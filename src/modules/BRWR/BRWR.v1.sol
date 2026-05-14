@@ -1,8 +1,8 @@
 ///SPDX-License-Identifier: MIT
 pragma solidity 0.8.34;
 
-import {Module} from "v1-core/Module.sol";
-import {Keycode} from "v1-core/interfaces/IController.sol";
+import {Module} from "enten-v1/Module.sol";
+import {Keycode} from "enten-v1/Utils.sol";
 
 abstract contract BRWRv1 is Module {
     constructor(address controller) Module(controller) {}

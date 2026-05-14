@@ -2,7 +2,7 @@
 pragma solidity 0.8.34;
 
 import {IBorrower} from "../../interfaces/IBorrower.sol";
-import {IEntenToken} from "enten-v1/interfaces/IEntenToken.sol";
+import {IToken} from "enten-v1/interfaces/IToken.sol";
 import {BRWRv1} from "./BRWR.v1.sol";
 import {IKernel} from "enten-v1/interfaces/IKernel.sol";
 import {IController} from "enten-v1/interfaces/IController.sol";
@@ -17,13 +17,13 @@ contract Borrower is IBorrower, BRWRv1 {
     uint256 internal constant WAD = 1e18;
 
     IKernel public immutable KERNEL;
-    IEntenToken public immutable TOKEN;
+    IToken public immutable TOKEN;
 
     constructor(address controller, address kernel) BRWRv1(controller) {
         KERNEL = IKernel(kernel);
         address token = IControllerTokenView(controller).TOKEN();
         if (token == address(0)) revert Borrower__TokenZeroAddress();
-        TOKEN = IEntenToken(token);
+        TOKEN = IToken(token);
     }
 
     function executeBorrowAction(Action action, address user, bytes calldata data) external permissioned {

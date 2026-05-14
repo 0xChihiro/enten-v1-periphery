@@ -2,7 +2,7 @@
 pragma solidity 0.8.34;
 
 import {IController} from "enten-v1/interfaces/IController.sol";
-import {IEntenToken} from "enten-v1/interfaces/IEntenToken.sol";
+import {IToken} from "enten-v1/interfaces/IToken.sol";
 import {IKernel} from "enten-v1/interfaces/IKernel.sol";
 import {IBurner} from "../../interfaces/IBurner.sol";
 import {Slots} from "enten-v1/libraries/Slots.sol";
@@ -17,12 +17,12 @@ interface IControllerTokenView {
 contract BurnerModule is BRNER {
     uint256 internal constant WAD = 1e18;
     IKernel public immutable KERNEL;
-    IEntenToken public immutable TOKEN;
+    IToken public immutable TOKEN;
 
     constructor(address controller, address kernel) BRNER(controller) {
         KERNEL = IKernel(kernel);
         address token = IControllerTokenView(controller).TOKEN();
-        TOKEN = IEntenToken(token);
+        TOKEN = IToken(token);
     }
 
     function executeDeflationaryAction(Action action, address user, uint256 amount)

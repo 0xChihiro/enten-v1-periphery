@@ -14,7 +14,7 @@ import {Currency} from "v4-core/src/types/Currency.sol";
 import {ModifyLiquidityParams, SwapParams} from "v4-core/src/types/PoolOperation.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 
-import {IEntenToken} from "enten-v1/interfaces/IEntenToken.sol";
+import {IToken} from "enten-v1/interfaces/IToken.sol";
 import {Policy} from "enten-v1/Policy.sol";
 import {Keycode, Permissions, toKeycode} from "enten-v1/Utils.sol";
 
@@ -52,7 +52,7 @@ contract EntenDeflationHook is IHooks, IUnlockCallback, Policy {
 
     constructor(address controller, IPoolManager poolManager, address entenToken) Policy(controller) {
         if (address(poolManager) == address(0) || entenToken == address(0)) revert Hook__ZeroAddress();
-        if (IEntenToken(entenToken).CONTROLLER() != controller) revert Hook__TokenControllerMismatch();
+        if (IToken(entenToken).CONTROLLER() != controller) revert Hook__TokenControllerMismatch();
 
         POOL_MANAGER = poolManager;
         ENTEN = Currency.wrap(entenToken);

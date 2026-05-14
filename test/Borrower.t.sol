@@ -4,7 +4,7 @@ pragma solidity 0.8.34;
 import {IBorrower} from "../src/interfaces/IBorrower.sol";
 import {Borrower} from "../src/modules/BRWR/Borrower.sol";
 import {Controller} from "enten-v1/Controller.sol";
-import {EntenToken} from "enten-v1/EntenToken.sol";
+import {Token} from "enten-v1/Token.sol";
 import {Kernel} from "enten-v1/Kernel.sol";
 import {Module} from "enten-v1/Module.sol";
 import {Policy} from "enten-v1/Policy.sol";
@@ -78,7 +78,7 @@ contract BorrowerTest is Test {
     Controller internal controller;
     Kernel internal kernel;
     Vault internal vault;
-    EntenToken internal token;
+    Token internal token;
     BorrowerHarness internal borrower;
     BorrowerTestPolicy internal policy;
     ERC20Mock internal asset;
@@ -98,7 +98,7 @@ contract BorrowerTest is Test {
 
         kernel = new Kernel(predictedController, predictedVault);
         vault = new Vault(predictedController, predictedKernel);
-        token = new EntenToken("Enten", "ENTEN", predictedController, user, INITIAL_SUPPLY, type(uint256).max);
+        token = new Token("Enten", "ENTEN", predictedController, user, INITIAL_SUPPLY, type(uint256).max);
         controller = new Controller(admin, protocolCollector, predictedKernel, predictedVault, predictedToken);
 
         borrower = new BorrowerHarness(address(controller), address(kernel));

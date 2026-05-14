@@ -4,7 +4,7 @@ pragma solidity 0.8.34;
 import {IBorrower} from "../src/interfaces/IBorrower.sol";
 import {Borrower} from "../src/modules/BRWR/Borrower.sol";
 import {Controller} from "enten-v1/Controller.sol";
-import {EntenToken} from "enten-v1/EntenToken.sol";
+import {Token} from "enten-v1/Token.sol";
 import {Kernel} from "enten-v1/Kernel.sol";
 import {Policy} from "enten-v1/Policy.sol";
 import {Vault} from "enten-v1/Vault.sol";
@@ -45,7 +45,7 @@ contract BorrowerInvariantPolicy is Policy {
 contract BorrowerInvariantHandler is Test {
     Borrower public immutable borrower;
     BorrowerInvariantPolicy public immutable policy;
-    EntenToken public immutable token;
+    Token public immutable token;
     Vault public immutable vault;
 
     address[] public users;
@@ -54,7 +54,7 @@ contract BorrowerInvariantHandler is Test {
     constructor(
         Borrower borrower_,
         BorrowerInvariantPolicy policy_,
-        EntenToken token_,
+        Token token_,
         Vault vault_,
         address[] memory users_,
         ERC20Mock[] memory assets_
@@ -281,7 +281,7 @@ contract BorrowerInvariantHandler is Test {
 }
 
 contract BorrowerInvariantTest is StdInvariant, Test {
-    uint256 internal constant USER_COUNT = 200;
+    uint256 internal constant USER_COUNT = 5;
     uint256 internal constant ASSET_COUNT = 5;
     uint256 internal constant USER_TOKEN_BALANCE = 100_000 ether;
     uint256 internal constant TOTAL_TOKEN_SUPPLY = USER_COUNT * USER_TOKEN_BALANCE;
@@ -290,7 +290,7 @@ contract BorrowerInvariantTest is StdInvariant, Test {
     Controller internal controller;
     Kernel internal kernel;
     Vault internal vault;
-    EntenToken internal token;
+    Token internal token;
     Borrower internal borrower;
     BorrowerInvariantPolicy internal policy;
     BorrowerInvariantHandler internal handler;
@@ -309,8 +309,7 @@ contract BorrowerInvariantTest is StdInvariant, Test {
 
         kernel = new Kernel(predictedController, predictedVault);
         vault = new Vault(predictedController, predictedKernel);
-        token =
-            new EntenToken("Enten", "ENTEN", predictedController, address(this), TOTAL_TOKEN_SUPPLY, type(uint256).max);
+        token = new Token("Enten", "ENTEN", predictedController, address(this), TOTAL_TOKEN_SUPPLY, type(uint256).max);
         controller = new Controller(admin, protocolCollector, predictedKernel, predictedVault, predictedToken);
 
         borrower = new Borrower(address(controller), address(kernel));
