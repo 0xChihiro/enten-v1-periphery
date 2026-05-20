@@ -17,8 +17,10 @@ import {PoolModifyLiquidityTest} from "v4-core/src/test/PoolModifyLiquidityTest.
 import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
 
 import {IBurner} from "../src/interfaces/IBurner.sol";
+import {BancorNavMath} from "../src/libraries/BancorNavMath.sol";
 import {BurnerModule} from "../src/modules/DFLT/Burner.sol";
 import {BRNER} from "../src/modules/DFLT/BRNER.sol";
+import {BurnerPolicy} from "../src/policies/BurnerPolicy.sol";
 import {EntenDeflationHook} from "../src/policies/EntenDeflationHook.sol";
 
 import {Controller} from "enten-v1/Controller.sol";
@@ -48,6 +50,7 @@ contract EntenDeflationHookTest is Test {
     ERC20Mock internal quote;
     BurnerModule internal burner;
     EntenDeflationHook internal hook;
+    BurnerPolicy internal directBurnPolicy;
     IPoolManager internal manager;
     PoolModifyLiquidityTest internal modifyLiquidityRouter;
     PoolSwapTest internal swapRouter;
@@ -55,6 +58,18 @@ contract EntenDeflationHookTest is Test {
 
     address internal admin = makeAddr("Admin");
     address internal protocolCollector = makeAddr("Protocol Collector");
+
+    event EntenBurnAccrued(uint256 amount);
+    event EntenBurned(uint256 amount);
+
+    struct BurnSnapshot {
+        uint256 totalSupply;
+        uint256 locked;
+        uint256 effectiveSupply;
+        uint256 curveSupply;
+        uint256 curveReserve;
+        uint256 redeemBacking;
+    }
 
     function testPolicyConfiguresBurnerDependencyAndPermission() public {
         _deployFixture(true);
@@ -93,6 +108,48 @@ contract EntenDeflationHookTest is Test {
         _deployFixture(false);
         assertFalse(_entenIsCurrency0());
         _assertBuyBurnsOutputEntenImmediatelyThroughModule();
+    }
+
+    function testSellSwapEmitsBurnAccruedAndBurnAccruedEmitsBurned() public {
+        _deployFixture(true);
+        uint256 amountIn = 1_000 ether;
+        uint256 expectedBurn = _feeAmount(amountIn);
+
+        vm.expectEmit(address(hook));
+        emit EntenBurnAccrued(expectedBurn);
+        _swap(_entenIsCurrency0(), amountIn);
+
+        vm.expectEmit(address(hook));
+        emit EntenBurned(expectedBurn);
+        hook.burnAccrued();
+    }
+
+    function testBuySwapEmitsBurned() public {
+        _deployFixture(true);
+        uint256 supplyBefore = enten.totalSupply();
+
+        vm.expectEmit(false, false, false, false, address(hook));
+        emit EntenBurned(0);
+        _swap(!_entenIsCurrency0(), 1_000 ether);
+
+        assertGt(supplyBefore - enten.totalSupply(), 0);
+    }
+
+    function testBuyBurnRevertsWhenBurnerModuleDisabledAndLeavesStateUnchanged() public {
+        _deployFixture(true);
+        uint256 supplyBefore = enten.totalSupply();
+        uint256 balanceBefore = enten.balanceOf(address(this));
+
+        vm.prank(admin);
+        controller.setModuleDisabled(toKeycode("BRNER"), true);
+
+        vm.expectRevert();
+        _swap(!_entenIsCurrency0(), 1_000 ether);
+
+        assertEq(enten.totalSupply(), supplyBefore);
+        assertEq(enten.balanceOf(address(this)), balanceBefore);
+        assertEq(enten.balanceOf(address(hook)), 0);
+        assertEq(hook.accruedSellBurns(), 0);
     }
 
     function testExactOutputSwapsRevertWithSelector() public {
@@ -217,6 +274,98 @@ contract EntenDeflationHookTest is Test {
 
         assertEq(_locked(), 0);
         assertEq(_effectiveSupply(), INITIAL_SUPPLY - expectedBurn);
+    }
+
+    function testHookSellAccrualDoesNotMoveCurveUntilBurnAccrued() public {
+        _deployFixtureWithCurve(true);
+        _seedCurveBackingAndState(900_000 ether, 1_000_000 ether, 1_000_000 ether);
+        uint256 amountIn = 1_000 ether;
+        uint256 expectedBurn = _feeAmount(amountIn);
+        uint256 supplyBefore = enten.totalSupply();
+        uint256 curveSupplyBefore = _curveSupply(address(quote));
+        uint256 curveReserveBefore = _curveReserve(address(quote));
+
+        _swap(_entenIsCurrency0(), amountIn);
+
+        assertEq(hook.accruedSellBurns(), expectedBurn);
+        assertEq(enten.totalSupply(), supplyBefore);
+        assertEq(_curveSupply(address(quote)), curveSupplyBefore);
+        assertEq(_curveReserve(address(quote)), curveReserveBefore);
+
+        hook.burnAccrued();
+
+        assertEq(supplyBefore - enten.totalSupply(), expectedBurn);
+        _assertCurveReducedAndAboveNavFloor(curveSupplyBefore, curveReserveBefore);
+        assertEq(hook.accruedSellBurns(), 0);
+    }
+
+    function testHookSellBurnAccruedUpdatesCurveStateLikePureBurn() public {
+        _deployFixtureWithCurve(true);
+        _seedCurveBackingAndState(900_000 ether, 1_000_000 ether, 1_000_000 ether);
+        _setLocked(100 ether);
+        uint256 amountIn = 1_000 ether;
+        uint256 expectedBurn = _feeAmount(amountIn);
+        uint256 lockedBefore = _locked();
+        uint256 supplyBefore = enten.totalSupply();
+        uint256 curveSupplyBefore = _curveSupply(address(quote));
+        uint256 curveReserveBefore = _curveReserve(address(quote));
+
+        _swap(_entenIsCurrency0(), amountIn);
+        hook.burnAccrued();
+
+        uint256 expectedUnlocked = expectedBurn < lockedBefore ? expectedBurn : lockedBefore;
+        assertEq(supplyBefore - enten.totalSupply(), expectedBurn);
+        assertEq(_locked(), lockedBefore - expectedUnlocked);
+        _assertCurveReducedAndAboveNavFloor(curveSupplyBefore, curveReserveBefore);
+    }
+
+    function testHookBuyImmediateBurnUpdatesCurveStateLikePureBurn() public {
+        _deployFixtureWithCurve(true);
+        _seedCurveBackingAndState(900_000 ether, 1_000_000 ether, 1_000_000 ether);
+        _setLocked(100 ether);
+        uint256 lockedBefore = _locked();
+        uint256 supplyBefore = enten.totalSupply();
+        uint256 curveSupplyBefore = _curveSupply(address(quote));
+        uint256 curveReserveBefore = _curveReserve(address(quote));
+
+        _swap(!_entenIsCurrency0(), 1_000 ether);
+
+        uint256 burned = supplyBefore - enten.totalSupply();
+        uint256 expectedUnlocked = burned < lockedBefore ? burned : lockedBefore;
+        assertGt(burned, 0);
+        assertEq(_locked(), lockedBefore - expectedUnlocked);
+        assertEq(hook.accruedSellBurns(), 0);
+        _assertCurveReducedAndAboveNavFloor(curveSupplyBefore, curveReserveBefore);
+    }
+
+    function testHookDrivenBurnMatchesDirectPolicyBurnForSameAmount() public {
+        _deployFixtureWithCurve(true);
+        _seedCurveBackingAndState(900_000 ether, 1_000_000 ether, 1_000_000 ether);
+        _setLocked(100 ether);
+        uint256 burnAmount = 7 ether;
+        uint256 amountIn = burnAmount * hook.BPS() / hook.BURN_BPS();
+        assertEq(_feeAmount(amountIn), burnAmount);
+
+        uint256 snapshot = vm.snapshotState();
+
+        vm.prank(address(this));
+        directBurnPolicy.burn(burnAmount);
+        BurnSnapshot memory direct = _burnSnapshot();
+
+        vm.revertToState(snapshot);
+
+        _swap(_entenIsCurrency0(), amountIn);
+        hook.burnAccrued();
+        BurnSnapshot memory hookDriven = _burnSnapshot();
+
+        assertEq(hookDriven.totalSupply, direct.totalSupply);
+        assertEq(hookDriven.locked, direct.locked);
+        assertEq(hookDriven.effectiveSupply, direct.effectiveSupply);
+        assertEq(hookDriven.curveSupply, direct.curveSupply);
+        assertEq(hookDriven.curveReserve, direct.curveReserve);
+        assertEq(hookDriven.redeemBacking, direct.redeemBacking);
+        assertEq(hook.accruedSellBurns(), 0);
+        assertEq(enten.balanceOf(address(hook)), 0);
     }
 
     function testBurnAccruedReturnsZeroWhenNoSellBurnsAccrued() public {
@@ -562,14 +711,18 @@ contract EntenDeflationHookTest is Test {
     }
 
     function _deployFixture(bool entenAsCurrency0) internal {
-        _deployFixture({entenAsCurrency0: entenAsCurrency0, activateHook: true});
+        _deployFixture({entenAsCurrency0: entenAsCurrency0, activateHook: true, configureCurveReserve: false});
+    }
+
+    function _deployFixtureWithCurve(bool entenAsCurrency0) internal {
+        _deployFixture({entenAsCurrency0: entenAsCurrency0, activateHook: true, configureCurveReserve: true});
     }
 
     function _deployFixtureWithoutActivatingHook(bool entenAsCurrency0) internal {
-        _deployFixture({entenAsCurrency0: entenAsCurrency0, activateHook: false});
+        _deployFixture({entenAsCurrency0: entenAsCurrency0, activateHook: false, configureCurveReserve: false});
     }
 
-    function _deployFixture(bool entenAsCurrency0, bool activateHook) internal {
+    function _deployFixture(bool entenAsCurrency0, bool activateHook, bool configureCurveReserve) internal {
         IV4PoolManagerDeployer deployer =
             IV4PoolManagerDeployer(deployCode("V4PoolManagerDeployer.sol:V4PoolManagerDeployer"));
         manager = IPoolManager(deployer.deploy(address(this)));
@@ -580,7 +733,9 @@ contract EntenDeflationHookTest is Test {
         quote = _deployQuoteForOrientation(entenAsCurrency0);
         quote.mint(address(this), INITIAL_SUPPLY);
 
-        burner = new BurnerModule(address(controller), address(kernel), address(0), 0);
+        address curveReserveAsset = configureCurveReserve ? address(quote) : address(0);
+        burner = new BurnerModule(address(controller), address(kernel), curveReserveAsset, 2);
+        directBurnPolicy = new BurnerPolicy(address(controller));
 
         address hookAddress = address(
             uint160(
@@ -597,6 +752,7 @@ contract EntenDeflationHookTest is Test {
 
         vm.startPrank(admin);
         controller.executeAction(Actions.InstallModule, address(burner));
+        controller.executeAction(Actions.ActivatePolicy, address(directBurnPolicy));
         if (activateHook) controller.executeAction(Actions.ActivatePolicy, address(hook));
         vm.stopPrank();
 
@@ -691,6 +847,63 @@ contract EntenDeflationHookTest is Test {
     function _setLocked(uint256 amount) internal {
         vm.prank(address(controller));
         kernel.updateState(Slots.TEAM_LOCKED_TOKENS_SLOT, bytes32(amount));
+    }
+
+    function _seedCurveBackingAndState(uint256 backing, uint256 virtualSupply, uint256 virtualReserve) internal {
+        quote.mint(address(vault), backing);
+        vm.startPrank(address(controller));
+        kernel.updateState(Slots.slots(Slots.BACKING_AMOUNT_SLOT, address(quote)), bytes32(backing));
+        kernel.updateState(_curveBaseSlot(address(quote)), bytes32(virtualSupply));
+        kernel.updateState(_curveReserveSlot(address(quote)), bytes32(virtualReserve));
+        vm.stopPrank();
+    }
+
+    function _assertCurveReducedAndAboveNavFloor(uint256 curveSupplyBefore, uint256 curveReserveBefore) internal view {
+        uint256 curveSupplyAfter = _curveSupply(address(quote));
+        uint256 curveReserveAfter = _curveReserve(address(quote));
+        assertLt(curveSupplyAfter, curveSupplyBefore);
+        assertLt(curveReserveAfter, curveReserveBefore);
+
+        uint256 postBurnNavFloor =
+            BancorNavMath.navFloorPriceWad(_effectiveSupply(), _redeemBacking(address(quote)), 500);
+        uint256 postSpot = BancorNavMath.bancorSpotPriceWad(curveSupplyAfter, curveReserveAfter, 2);
+        assertGe(postSpot, postBurnNavFloor);
+    }
+
+    function _burnSnapshot() internal view returns (BurnSnapshot memory snapshot) {
+        snapshot = BurnSnapshot({
+            totalSupply: enten.totalSupply(),
+            locked: _locked(),
+            effectiveSupply: _effectiveSupply(),
+            curveSupply: _curveSupply(address(quote)),
+            curveReserve: _curveReserve(address(quote)),
+            redeemBacking: _redeemBacking(address(quote))
+        });
+    }
+
+    function _curveSupply(address token_) internal view returns (uint256) {
+        return uint256(kernel.viewData(_curveBaseSlot(token_)));
+    }
+
+    function _curveReserve(address token_) internal view returns (uint256) {
+        return uint256(kernel.viewData(_curveReserveSlot(token_)));
+    }
+
+    function _redeemBacking(address token_) internal view returns (uint256) {
+        return uint256(kernel.viewData(Slots.slots(Slots.BACKING_AMOUNT_SLOT, token_)));
+    }
+
+    function _curveBaseSlot(address token_) internal pure returns (bytes32 slot) {
+        bytes32 namespace = keccak256("enten.bancor.curve.base.slot");
+        assembly ("memory-safe") {
+            mstore(0x00, namespace)
+            mstore(0x20, and(token_, 0xffffffffffffffffffffffffffffffffffffffff))
+            slot := keccak256(0x00, 0x40)
+        }
+    }
+
+    function _curveReserveSlot(address token_) internal pure returns (bytes32) {
+        return bytes32(uint256(_curveBaseSlot(token_)) + 1);
     }
 
     function _locked() internal view returns (uint256) {

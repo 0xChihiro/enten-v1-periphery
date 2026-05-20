@@ -420,6 +420,40 @@ contract BurnerModuleAndPolicyTest is Test {
         assertEq(_bucketValue(IVault.Bucket.Redeem, address(asset)), effectiveBefore);
     }
 
+    function testFuzzRedeemTransfersRoundedProRataBackingAndUpdatesBuckets(
+        uint256 rawLocked,
+        uint256 rawRedeemAmount,
+        uint256 rawFirstBacking,
+        uint256 rawSecondBacking
+    ) public {
+        _setAssets(address(asset), address(secondAsset));
+        uint256 lockedBefore = bound(rawLocked, 0, INITIAL_SUPPLY - 2);
+        uint256 effectiveBefore = INITIAL_SUPPLY - lockedBefore;
+        uint256 redeemAmount = bound(rawRedeemAmount, 1, effectiveBefore - 1);
+        uint256 firstBacking = bound(rawFirstBacking, 1, 2_000 ether);
+        uint256 secondBacking = bound(rawSecondBacking, 1, 2_000 ether);
+        _seedBacking(asset, firstBacking);
+        _seedBacking(secondAsset, secondBacking);
+        _setLocked(lockedBefore);
+
+        uint256 expectedFirstReceipt = _expectedRedeemReceipt(firstBacking, effectiveBefore, redeemAmount);
+        uint256 expectedSecondReceipt = _expectedRedeemReceipt(secondBacking, effectiveBefore, redeemAmount);
+
+        vm.prank(user);
+        policy.redeem(redeemAmount);
+
+        assertEq(asset.balanceOf(user), expectedFirstReceipt);
+        assertEq(secondAsset.balanceOf(user), expectedSecondReceipt);
+        assertEq(asset.balanceOf(address(vault)), firstBacking - expectedFirstReceipt);
+        assertEq(secondAsset.balanceOf(address(vault)), secondBacking - expectedSecondReceipt);
+        assertEq(_bucketValue(IVault.Bucket.Redeem, address(asset)), firstBacking - expectedFirstReceipt);
+        assertEq(_bucketValue(IVault.Bucket.Redeem, address(secondAsset)), secondBacking - expectedSecondReceipt);
+        assertEq(token.totalSupply(), INITIAL_SUPPLY - redeemAmount);
+        assertEq(token.balanceOf(user), INITIAL_SUPPLY - redeemAmount);
+        assertEq(_locked(), lockedBefore);
+        assertEq(_effectiveSupply(), effectiveBefore - redeemAmount);
+    }
+
     function testBurnThatOnlyUnlocksTeamTokensStillLowersCurveState() public {
         _seedBacking(asset, 900 ether);
         _setLocked(100 ether);
@@ -487,6 +521,44 @@ contract BurnerModuleAndPolicyTest is Test {
         assertEq(token.balanceOf(user), INITIAL_SUPPLY);
         assertEq(_locked(), 100 ether);
         assertEq(asset.balanceOf(address(vault)), 900 ether);
+    }
+
+    function testDisabledBurnerModuleBlocksPolicyRedeemAtomically() public {
+        _seedBacking(asset, 900 ether);
+        _setLocked(100 ether);
+
+        vm.prank(admin);
+        controller.setModuleDisabled(toKeycode("BRNER"), true);
+
+        vm.expectRevert(abi.encodeWithSelector(IController.Controller__ModuleDisabled.selector, toKeycode("BRNER")));
+        vm.prank(user);
+        policy.redeem(10 ether);
+
+        assertEq(token.totalSupply(), INITIAL_SUPPLY);
+        assertEq(token.balanceOf(user), INITIAL_SUPPLY);
+        assertEq(asset.balanceOf(user), 0);
+        assertEq(asset.balanceOf(address(vault)), 900 ether);
+        assertEq(_bucketValue(IVault.Bucket.Redeem, address(asset)), 900 ether);
+        assertEq(_locked(), 100 ether);
+    }
+
+    function testRedeemAfterPolicyDeactivatedRevertsAndLeavesStateUnchanged() public {
+        _seedBacking(asset, 900 ether);
+        _setLocked(100 ether);
+
+        vm.prank(admin);
+        controller.executeAction(Actions.DeactivatePolicy, address(policy));
+
+        vm.expectRevert(abi.encodeWithSelector(Module.Module__PolicyNotPermitted.selector, address(policy)));
+        vm.prank(user);
+        policy.redeem(10 ether);
+
+        assertEq(token.totalSupply(), INITIAL_SUPPLY);
+        assertEq(token.balanceOf(user), INITIAL_SUPPLY);
+        assertEq(asset.balanceOf(user), 0);
+        assertEq(asset.balanceOf(address(vault)), 900 ether);
+        assertEq(_bucketValue(IVault.Bucket.Redeem, address(asset)), 900 ether);
+        assertEq(_locked(), 100 ether);
     }
 
     function testBurnerPolicyReconfiguresDependencyAfterModuleUpgrade() public {
@@ -600,6 +672,15 @@ contract BurnerModuleAndPolicyTest is Test {
 
     function _bucketValue(IVault.Bucket bucket, address token_) internal view returns (uint256) {
         return uint256(kernel.viewData(_bucketSlot(bucket, token_)));
+    }
+
+    function _expectedRedeemReceipt(uint256 backing, uint256 effectiveSupply_, uint256 redeemAmount)
+        internal
+        pure
+        returns (uint256)
+    {
+        uint256 backingPerToken = backing * 1e18 / effectiveSupply_;
+        return redeemAmount * backingPerToken / 1e18;
     }
 
     function _bucketSlot(IVault.Bucket bucket, address token_) internal pure returns (bytes32) {
