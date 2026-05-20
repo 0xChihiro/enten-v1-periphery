@@ -354,6 +354,30 @@ contract AdminTest is Test {
         assertEq(uint256(kernel.viewData(Slots.ASSETS_LENGTH_SLOT)), 1);
     }
 
+    function testV1AssetRegistryCannotBeDelistedThroughGatewayOrDirectAdminModuleCall() public {
+        vm.startPrank(assetAdmin);
+        gateway.addAsset(address(asset));
+        gateway.addAsset(address(secondAsset));
+        vm.stopPrank();
+
+        IController.StateUpdate[] memory updates = new IController.StateUpdate[](2);
+        updates[0] = IController.StateUpdate({
+            op: IController.Op.Set, slot: Slots.ASSETS_LENGTH_SLOT, data: bytes32(uint256(1))
+        });
+        updates[1] = IController.StateUpdate({
+            op: IController.Op.Set, slot: bytes32(uint256(Slots.ASSETS_BASE_SLOT) + 1), data: bytes32(0)
+        });
+
+        vm.prank(assetAdmin);
+        vm.expectRevert(abi.encodeWithSelector(Module.Module__PolicyNotPermitted.selector, assetAdmin));
+        adminModule.updateAdminState(updates);
+
+        assertEq(uint256(kernel.viewData(Slots.ASSETS_LENGTH_SLOT)), 2);
+        bytes memory rawAssets = kernel.viewData(Slots.ASSETS_BASE_SLOT, 2);
+        assertEq(_addressAt(rawAssets, 0), address(asset));
+        assertEq(_addressAt(rawAssets, 1), address(secondAsset));
+    }
+
     function testUpdateSystemInstallsModuleThroughAdminModule() public {
         AuxiliaryAdminModule auxiliary = new AuxiliaryAdminModule(address(controller));
         ADMINv1.SystemUpgrade[] memory upgrades = new ADMINv1.SystemUpgrade[](1);

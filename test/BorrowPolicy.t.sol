@@ -3,6 +3,8 @@ pragma solidity 0.8.34;
 
 import {BorrowPolicy} from "../src/policies/BorrowPolicy.sol";
 import {Borrower} from "../src/modules/BRWR/Borrower.sol";
+import {Admin} from "../src/modules/ADMIN/Admin.sol";
+import {Gateway} from "../src/policies/Gateway.sol";
 import {IBorrower} from "../src/interfaces/IBorrower.sol";
 import {Controller} from "enten-v1/Controller.sol";
 import {Token} from "enten-v1/Token.sol";
@@ -138,7 +140,7 @@ contract BorrowPolicyTest is Test {
         assertEq(_bucketValue(IVault.Bucket.Collateral, address(token)), 123 ether);
     }
 
-    function testRepayAllFullyRepaysDebtAfterAssetIsDelisted() public {
+    function testRepayAllStillClearsDebtIfRawAssetRegistryNoLongerContainsDebtAsset() public {
         _setAssets(address(asset), address(secondAsset));
         _seedBacking(asset, INITIAL_SUPPLY);
         _depositCollateral(100 ether);
@@ -161,7 +163,7 @@ contract BorrowPolicyTest is Test {
         assertEq(_bucketValue(IVault.Bucket.Redeem, address(asset)), INITIAL_SUPPLY);
     }
 
-    function testPartialRepayOfDelistedAssetIsBlockedByPolicy() public {
+    function testPartialRepayOfRawRemovedAssetIsBlockedByPolicyAssetValidation() public {
         _setAssets(address(asset), address(secondAsset));
         _seedBacking(asset, INITIAL_SUPPLY);
         _depositCollateral(100 ether);
@@ -532,6 +534,58 @@ contract BorrowPolicyTest is Test {
         assertEq(_bucketValue(IVault.Bucket.Redeem, address(secondAsset)), 120 ether);
     }
 
+    function testEndToEndBorrowLifecycleThroughGatewayRegisteredAssets() public {
+        _registerAssetsThroughGateway(address(asset), address(secondAsset));
+        _seedBacking(asset, INITIAL_SUPPLY);
+        _seedBacking(secondAsset, 500 ether);
+
+        _depositCollateral(200 ether);
+        _borrow(_oneReceipt(address(asset), 60 ether));
+
+        vm.prank(user);
+        policy.borrowMax();
+
+        IBorrower.UserPosition memory position = borrower.positions(user);
+        assertEq(position.collateral, 200 ether);
+        assertEq(position.debt.length, 2);
+        assertEq(position.debt[0].asset, address(asset));
+        assertEq(position.debt[0].amount, 200 ether);
+        assertEq(position.debt[1].asset, address(secondAsset));
+        assertEq(position.debt[1].amount, 100 ether);
+
+        _approveAsset(asset, 40 ether);
+        vm.prank(user);
+        policy.repay(_oneReceipt(address(asset), 40 ether));
+
+        position = borrower.positions(user);
+        assertEq(position.collateral, 200 ether);
+        assertEq(position.debt[0].amount, 160 ether);
+        assertEq(position.debt[1].amount, 100 ether);
+
+        _approveAsset(asset, 160 ether);
+        _approveAsset(secondAsset, 100 ether);
+        vm.prank(user);
+        policy.repayAll();
+
+        vm.prank(user);
+        policy.withdraw(200 ether);
+
+        position = borrower.positions(user);
+        assertEq(position.collateral, 0);
+        assertEq(position.debt.length, 2);
+        assertEq(position.debt[0].amount, 0);
+        assertEq(position.debt[1].amount, 0);
+        assertEq(token.balanceOf(user), INITIAL_SUPPLY);
+        assertEq(asset.balanceOf(user), 0);
+        assertEq(secondAsset.balanceOf(user), 0);
+        assertEq(token.balanceOf(address(vault)), 0);
+        assertEq(_bucketValue(IVault.Bucket.Collateral, address(token)), 0);
+        assertEq(_bucketValue(IVault.Bucket.Borrow, address(asset)), 0);
+        assertEq(_bucketValue(IVault.Bucket.Borrow, address(secondAsset)), 0);
+        assertEq(_bucketValue(IVault.Bucket.Redeem, address(asset)), INITIAL_SUPPLY);
+        assertEq(_bucketValue(IVault.Bucket.Redeem, address(secondAsset)), 500 ether);
+    }
+
     function testWithdrawCannotMakePositionUndercollateralized() public {
         _setAssets(address(asset), address(secondAsset));
         _seedBacking(asset, 500 ether);
@@ -568,6 +622,19 @@ contract BorrowPolicyTest is Test {
     function _borrowMaxFor(address account) internal {
         vm.prank(account);
         policy.borrowMax();
+    }
+
+    function _registerAssetsThroughGateway(address first, address second) internal {
+        Admin adminModule = new Admin(address(controller));
+        Gateway gateway = new Gateway(address(controller), admin);
+
+        vm.startPrank(admin);
+        controller.executeAction(Actions.InstallModule, address(adminModule));
+        controller.executeAction(Actions.ActivatePolicy, address(gateway));
+        controller.grantRole(controller.EXECUTOR_ROLE(), address(adminModule));
+        gateway.addAsset(first);
+        gateway.addAsset(second);
+        vm.stopPrank();
     }
 
     function _borrow(IController.Receipt[] memory receipts) internal {
