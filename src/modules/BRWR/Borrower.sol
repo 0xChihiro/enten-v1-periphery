@@ -8,10 +8,7 @@ import {IKernel} from "enten-v1/interfaces/IKernel.sol";
 import {IController} from "enten-v1/interfaces/IController.sol";
 import {Slots} from "enten-v1/libraries/Slots.sol";
 import {Math} from "openzeppelin/contracts/utils/math/Math.sol";
-
-interface IControllerTokenView {
-    function TOKEN() external view returns (address);
-}
+import {backingPerToken, effectiveSupply} from "../../Utils.sol";
 
 contract Borrower is IBorrower, BRWRv1 {
     uint256 internal constant WAD = 1e18;
@@ -21,12 +18,12 @@ contract Borrower is IBorrower, BRWRv1 {
 
     constructor(address controller, address kernel) BRWRv1(controller) {
         KERNEL = IKernel(kernel);
-        address token = IControllerTokenView(controller).TOKEN();
+        address token = address(IController(controller).TOKEN());
         if (token == address(0)) revert Borrower__TokenZeroAddress();
         TOKEN = IToken(token);
     }
 
-    function executeBorrowAction(Action action, address user, bytes calldata data) external permissioned {
+    function executeBorrowAction(Action action, address user, bytes calldata data) external override permissioned {
         (UserPosition memory position, uint256 userSlot) = _getPosition(user);
         ActionData memory actionData = abi.decode(data, (ActionData));
         UserPosition memory updatedPosition = _buildUpdatedPosition(action, position, actionData);
@@ -114,6 +111,20 @@ contract Borrower is IBorrower, BRWRv1 {
         (position,) = _getPosition(user);
     }
 
+    /*
+        Enten Borrow Module v1.0.0
+        User positions are start at the keccak of the 64 bytes slot name that is made up of  the position base slot and the users address.
+        The layout in storage for a user position is as follows
+        Slot Index 0: Collateral Amount,
+        Slot Index 1: Length of Debt Position Array
+
+        Following Slot Index 1 you have a debt array that holds debt positions as 2 slots per position,
+        Slot 0 of Debt Position[i] is the asset
+        Slot 1 of Debt Position[i] is the amount current borrowed.
+
+        so the total slots read for returning a position for any given user is
+        2 + (n * 2) where n is the length of the debt position array.
+    */
     function _getPosition(address user) internal view returns (UserPosition memory position, uint256 userSlot) {
         bytes32 slot = Slots.USER_POSITION_BASE_SLOT;
 
@@ -401,18 +412,18 @@ contract Borrower is IBorrower, BRWRv1 {
     function _validatePosition(UserPosition memory position) internal view {
         if (!_hasActiveDebt(position)) return;
 
-        uint256 totalSupply = TOKEN.totalSupply();
+        uint256 totalSupply = effectiveSupply(KERNEL, TOKEN);
         if (totalSupply == 0) revert Borrower__ZeroTokenSupply();
 
-        IController.Backing[] memory backing = _backingPerToken(totalSupply);
+        IController.Backing[] memory backing = backingPerToken(KERNEL, totalSupply);
 
         for (uint256 i; i < position.debt.length;) {
             DebtPosition memory debt = position.debt[i];
 
             if (debt.amount != 0 && _isFirstDebtAsset(position, debt.asset, i)) {
                 uint256 totalDebt = _totalDebtForAsset(position, debt.asset, i);
-                uint256 backingPerToken = _backingPerTokenForAsset(backing, debt.asset);
-                uint256 borrowLimit = Math.mulDiv(position.collateral, backingPerToken, WAD);
+                uint256 assetBackingPerToken = _backingPerTokenForAsset(backing, debt.asset);
+                uint256 borrowLimit = Math.mulDiv(position.collateral, assetBackingPerToken, WAD);
 
                 if (totalDebt > borrowLimit) revert Borrower__PositionNotCollateralized();
             }
@@ -467,50 +478,6 @@ contract Borrower is IBorrower, BRWRv1 {
         }
     }
 
-    function _backingPerToken() internal view returns (IController.Backing[] memory backing) {
-        return _backingPerToken(TOKEN.totalSupply());
-    }
-
-    function _backingPerToken(uint256 totalSupply) internal view returns (IController.Backing[] memory backing) {
-        if (totalSupply == 0) return new IController.Backing[](0);
-
-        uint256 assetsLength = uint256(KERNEL.viewData(Slots.ASSETS_LENGTH_SLOT));
-        backing = new IController.Backing[](assetsLength);
-        if (assetsLength == 0) return backing;
-
-        bytes memory rawAssets = KERNEL.viewData(Slots.ASSETS_BASE_SLOT, assetsLength);
-        bytes32[] memory slots = new bytes32[](assetsLength * 2);
-
-        for (uint256 i; i < assetsLength;) {
-            address asset;
-
-            assembly ("memory-safe") {
-                asset := and(mload(add(add(rawAssets, 0x20), shl(5, i))), 0xffffffffffffffffffffffffffffffffffffffff)
-            }
-
-            backing[i].asset = asset;
-            uint256 offset = i * 2;
-            slots[offset] = _slot(Slots.BACKING_AMOUNT_SLOT, asset);
-            slots[offset + 1] = _slot(Slots.ASSET_TOTAL_BORROWED_BASE_SLOT, asset);
-
-            unchecked {
-                ++i;
-            }
-        }
-
-        bytes32[] memory responses = KERNEL.viewData(slots);
-
-        for (uint256 i; i < assetsLength;) {
-            uint256 offset = i * 2;
-            uint256 totalBacking = uint256(responses[offset]) + uint256(responses[offset + 1]);
-            backing[i].backingPerToken = Math.mulDiv(totalBacking, WAD, totalSupply);
-
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
     function _backingPerTokenForAsset(IController.Backing[] memory backing, address asset)
         internal
         pure
@@ -525,13 +492,5 @@ contract Borrower is IBorrower, BRWRv1 {
         }
 
         revert Borrower__DebtAssetNotBacked();
-    }
-
-    function _slot(bytes32 namespace, address asset) internal pure returns (bytes32 slot) {
-        assembly ("memory-safe") {
-            mstore(0x00, namespace)
-            mstore(0x20, and(asset, 0xffffffffffffffffffffffffffffffffffffffff))
-            slot := keccak256(0x00, 0x40)
-        }
     }
 }

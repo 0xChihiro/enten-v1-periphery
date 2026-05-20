@@ -25,8 +25,6 @@ contract EntenDeflationHook is IHooks, IUnlockCallback, Policy {
     uint256 public constant BPS = 10_000;
     uint256 public constant BURN_BPS = 70;
 
-    Keycode internal constant DFLTN_KEYCODE = Keycode.wrap("DFLTN");
-
     IPoolManager public immutable POOL_MANAGER;
     Currency public immutable ENTEN;
 
@@ -83,16 +81,17 @@ contract EntenDeflationHook is IHooks, IUnlockCallback, Policy {
         });
     }
 
-    function configureDependencies() external override returns (Keycode[] memory dependencies) {
+    function configureDependencies() external override onlyController returns (Keycode[] memory dependencies) {
         dependencies = new Keycode[](1);
-        dependencies[0] = DFLTN_KEYCODE;
+        dependencies[0] = toKeycode("BRNER");
 
-        deflationBurner = getModuleAddress(DFLTN_KEYCODE);
+        deflationBurner = getModuleAddress(dependencies[0]);
     }
 
     function requestPermissions() external pure override returns (Permissions[] memory requests) {
         requests = new Permissions[](1);
-        requests[0] = Permissions({keycode: DFLTN_KEYCODE, funcSelector: IBurner.executeDeflationaryAction.selector});
+        requests[0] =
+            Permissions({keycode: Keycode.wrap("BRNER"), funcSelector: IBurner.executeDeflationaryAction.selector});
     }
 
     function beforeInitialize(address, PoolKey calldata key, uint160) external view onlyPoolManager returns (bytes4) {

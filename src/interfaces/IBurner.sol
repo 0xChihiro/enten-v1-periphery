@@ -10,4 +10,7 @@ interface IBurner {
     function executeDeflationaryAction(Action, address, uint256) external;
 
     error Burner__ActionImpossible();
+    error Burner__ZeroEffectiveSupply();
+    error Burner__NoRegisteredAssets();
+    error Burner__RedeemWouldZeroEffectiveSupply();
 }

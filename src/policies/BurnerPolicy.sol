@@ -11,7 +11,7 @@ contract BurnerPolicy is Policy {
 
     constructor(address controller) Policy(controller) {}
 
-    function configureDependencies() external override returns (Keycode[] memory dependencies) {
+    function configureDependencies() external override onlyController returns (Keycode[] memory dependencies) {
         dependencies = new Keycode[](1);
         dependencies[0] = toKeycode("BRNER");
 

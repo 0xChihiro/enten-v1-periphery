@@ -13,6 +13,7 @@ import {IToken} from "enten-v1/interfaces/IToken.sol";
 import {IKernel} from "enten-v1/interfaces/IKernel.sol";
 import {Slots} from "enten-v1/libraries/Slots.sol";
 import {ICurve} from "../interfaces/ICurve.sol";
+import {effectiveSupply} from "../Utils.sol";
 
 interface IControllerView {
     function BPS() external view returns (uint256);
@@ -238,11 +239,14 @@ contract IssuanceCurve is Policy, ICurve {
     }
 
     function navPriceWad() external view returns (uint256) {
-        return BancorNavMath.navPriceWad(TOKEN.totalSupply(), reserveBackingBalanceWad());
+        return BancorNavMath.navPriceWad(effectiveSupply(KERNEL, TOKEN), reserveBackingBalanceWad());
     }
 
     function navFloorPriceWad() external view returns (uint256) {
-        return BancorNavMath.navFloorPriceWad(TOKEN.totalSupply(), reserveBackingBalanceWad(), MIN_NAV_PREMIUM_BPS);
+        return
+            BancorNavMath.navFloorPriceWad(
+                effectiveSupply(KERNEL, TOKEN), reserveBackingBalanceWad(), MIN_NAV_PREMIUM_BPS
+            );
     }
 
     function bancorSpotPriceWad() external view returns (uint256) {
@@ -291,10 +295,10 @@ contract IssuanceCurve is Policy, ICurve {
     }
 
     function _quoteContext() internal view returns (QuoteContext memory context) {
-        uint256 actualSupply = TOKEN.totalSupply();
+        uint256 actualSupply = effectiveSupply(KERNEL, TOKEN);
         if (actualSupply == 0) revert Curve__InvalidSupply();
 
-        context.maxSupply = TOKEN.MAX_SUPPLY();
+        context.maxSupply = TOKEN.MAX_SUPPLY() - uint256(KERNEL.viewData(Slots.TEAM_LOCKED_TOKENS_SLOT));
 
         CurveState memory state = curveState();
         if (state.virtualSupplyWad == 0 || state.virtualReserveWad == 0) revert Curve__VirtualCurveNotSeeded();

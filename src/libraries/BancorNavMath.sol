@@ -83,6 +83,56 @@ library BancorNavMath {
         curveReserveDeltaWad = Math.mulDiv(virtualReserveWad, WAD - decay, WAD);
     }
 
+    function boundedCurveStateReductionForBurn(
+        PricingContext memory context,
+        uint256 curveBurnAmount,
+        uint256 postBurnActualSupply
+    ) internal pure returns (uint256 curveSupplyDeltaWad, uint256 curveReserveDeltaWad) {
+        if (curveBurnAmount == 0) return (0, 0);
+        if (postBurnActualSupply == 0 || postBurnActualSupply > context.actualSupply) {
+            revert BancorNavMath__InvalidSupply();
+        }
+        uint256 virtualSupply = context.virtualSupply;
+        uint256 virtualReserve = context.curveReserveWad;
+        uint8 shape = context.shape;
+        if (virtualSupply == 0) revert BancorNavMath__InvalidSupply();
+
+        uint256 postBurnNavFloor =
+            navFloorPriceWad(postBurnActualSupply, context.backingBalanceWad, context.navPremiumBps);
+        uint256 currentSpot = bancorSpotPriceWad(virtualSupply, virtualReserve, shape);
+        if (currentSpot <= postBurnNavFloor) return (0, 0);
+
+        uint256 upperBound = Math.min(curveBurnAmount, virtualSupply);
+        if (postBurnNavFloor > 0 && upperBound == virtualSupply) upperBound = virtualSupply - 1;
+        if (upperBound == 0) return (0, 0);
+
+        uint256 low;
+        uint256 high = upperBound;
+        while (low < high) {
+            uint256 mid = (low + high + 1) / 2;
+            uint256 candidateSpot = _curveSpotAfterBurnReduction(virtualSupply, virtualReserve, mid, shape);
+
+            if (candidateSpot >= postBurnNavFloor) low = mid;
+            else high = mid - 1;
+        }
+
+        if (low == 0) return (0, 0);
+        return curveStateReductionForBurn(virtualSupply, virtualReserve, low, shape);
+    }
+
+    function _curveSpotAfterBurnReduction(
+        uint256 virtualSupplyWad,
+        uint256 virtualReserveWad,
+        uint256 burnAmount,
+        uint8 shape
+    ) private pure returns (uint256) {
+        (uint256 supplyDelta, uint256 reserveDelta) =
+            curveStateReductionForBurn(virtualSupplyWad, virtualReserveWad, burnAmount, shape);
+        uint256 newSupply = virtualSupplyWad - supplyDelta;
+        if (newSupply == 0) return 0;
+        return bancorSpotPriceWad(newSupply, virtualReserveWad - reserveDelta, shape);
+    }
+
     function navFloorBackingInWad(uint256 supply, uint256 tokenAmount, uint256 backingBalanceWad, uint256 navPremiumBps)
         internal
         pure
