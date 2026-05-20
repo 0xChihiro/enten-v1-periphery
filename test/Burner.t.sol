@@ -513,7 +513,7 @@ contract BurnerModuleAndPolicyTest is Test {
 
     function _transferToken(address from, address to, uint256 amount) internal {
         vm.prank(from);
-        token.transfer(to, amount);
+        assertTrue(token.transfer(to, amount));
     }
 
     function _seedBacking(ERC20Mock token_, uint256 amount) internal {

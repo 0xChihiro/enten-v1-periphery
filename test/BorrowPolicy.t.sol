@@ -129,6 +129,75 @@ contract BorrowPolicyTest is Test {
         assertEq(asset.balanceOf(user), 15 ether);
     }
 
+    function testTotalCollateralReadsTokenCollateralBucket() public {
+        _setAssets(address(asset), address(secondAsset));
+        _seedBacking(asset, INITIAL_SUPPLY);
+        _depositCollateral(123 ether);
+
+        assertEq(policy.totalCollateral(address(token)), 123 ether);
+        assertEq(_bucketValue(IVault.Bucket.Collateral, address(token)), 123 ether);
+    }
+
+    function testRepayAllFullyRepaysDebtAfterAssetIsDelisted() public {
+        _setAssets(address(asset), address(secondAsset));
+        _seedBacking(asset, INITIAL_SUPPLY);
+        _depositCollateral(100 ether);
+        _borrow(_oneReceipt(address(asset), 40 ether));
+        _approveAsset(asset, 40 ether);
+
+        address[] memory remainingAssets = new address[](1);
+        remainingAssets[0] = address(secondAsset);
+        _setAssets(remainingAssets);
+
+        vm.prank(user);
+        policy.repayAll();
+
+        IBorrower.UserPosition memory position = borrower.positions(user);
+        assertEq(position.debt.length, 1);
+        assertEq(position.debt[0].asset, address(asset));
+        assertEq(position.debt[0].amount, 0);
+        assertEq(asset.balanceOf(user), 0);
+        assertEq(_bucketValue(IVault.Bucket.Borrow, address(asset)), 0);
+        assertEq(_bucketValue(IVault.Bucket.Redeem, address(asset)), INITIAL_SUPPLY);
+    }
+
+    function testPartialRepayOfDelistedAssetIsBlockedByPolicy() public {
+        _setAssets(address(asset), address(secondAsset));
+        _seedBacking(asset, INITIAL_SUPPLY);
+        _depositCollateral(100 ether);
+        _borrow(_oneReceipt(address(asset), 40 ether));
+        _approveAsset(asset, 10 ether);
+
+        address[] memory remainingAssets = new address[](1);
+        remainingAssets[0] = address(secondAsset);
+        _setAssets(remainingAssets);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(AssetNotBorrowable.selector, address(asset)));
+        policy.repay(_oneReceipt(address(asset), 10 ether));
+    }
+
+    function testFuzzBorrowLimitMatchesModuleEnforcedRoundedCapacity(uint96 collateralSeed, uint96 backingSeed) public {
+        uint256 collateral = bound(uint256(collateralSeed), 1, INITIAL_SUPPLY);
+        uint256 backing = bound(uint256(backingSeed), 1, INITIAL_SUPPLY * 5);
+        _setAssets(address(asset), address(secondAsset));
+        _seedBacking(asset, backing);
+        _depositCollateral(collateral);
+
+        uint256 maxBorrow = policy.maxBorrowForAsset(user, address(asset));
+        uint256 expectedMax = Math.mulDiv(collateral, Math.mulDiv(backing, 1e18, INITIAL_SUPPLY), 1e18);
+        assertEq(maxBorrow, expectedMax);
+
+        if (maxBorrow != 0) {
+            _borrow(_oneReceipt(address(asset), maxBorrow));
+            assertEq(policy.currentDebtForAsset(user, address(asset)), maxBorrow);
+        }
+
+        vm.prank(user);
+        vm.expectRevert(IBorrower.Borrower__PositionNotCollateralized.selector);
+        policy.borrow(_oneReceipt(address(asset), 1));
+    }
+
     function testBorrowableReturnsFullCapacityForAssetsWithoutDebt() public {
         _setAssets(address(asset), address(secondAsset));
         _seedBacking(asset, INITIAL_SUPPLY);

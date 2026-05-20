@@ -39,4 +39,6 @@ interface IBorrower {
     error Borrower__TokenZeroAddress();
     error Borrower__ZeroTokenSupply();
     error Borrower__UseDepositAndBorrow();
+    error Borrower__UseRepayAndWithdraw();
+    error Borrower__CollateralNotAllowed();
 }

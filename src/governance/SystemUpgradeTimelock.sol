@@ -51,14 +51,16 @@ contract SystemUpgradeTimelock {
 
         operationId = _hashOperation(data);
         uint256 currentExecutableAt = executableAt[operationId];
+        uint256 currentTimestamp = block.timestamp;
         if (executed[operationId]) revert SystemUpgradeTimelock__AlreadyExecuted();
         if (
-            currentExecutableAt != 0 && !cancelled[operationId] && block.timestamp <= currentExecutableAt + GRACE_PERIOD
+            currentExecutableAt != 0 && !cancelled[operationId]
+                && currentTimestamp <= currentExecutableAt + GRACE_PERIOD
         ) {
             revert SystemUpgradeTimelock__AlreadyQueued();
         }
 
-        uint256 timestamp = block.timestamp + DELAY;
+        uint256 timestamp = currentTimestamp + DELAY;
         executableAt[operationId] = timestamp;
         cancelled[operationId] = false;
 
@@ -83,7 +85,9 @@ contract SystemUpgradeTimelock {
         if (timestamp == 0) revert SystemUpgradeTimelock__NotQueued();
         if (executed[operationId]) revert SystemUpgradeTimelock__AlreadyExecuted();
         if (cancelled[operationId]) revert SystemUpgradeTimelock__Cancelled();
+        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp < timestamp) revert SystemUpgradeTimelock__DelayNotElapsed();
+        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp > timestamp + GRACE_PERIOD) revert SystemUpgradeTimelock__OperationExpired();
 
         executed[operationId] = true;

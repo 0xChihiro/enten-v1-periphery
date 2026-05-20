@@ -24,6 +24,15 @@ contract BorrowPolicy is Policy {
     error Borrower__InvalidAssetsLength();
     error Borrower__NoAssetsAvailable();
 
+    event Borrower__Borrow(address indexed borrower, IController.Receipt[] borrowData);
+    event Borrower__Deposit(address indexed depositor, uint256 collateral);
+    event Borrower__Repay(address indexed user, IController.Receipt[] repaymentData);
+    event Borrower__Withdraw(address indexed user, uint256 collateralRemoved);
+    event Borrower__DepositAndBorrow(address indexed user, uint256 collateral, IController.Receipt[] borrowData);
+    event Borrower__RepayAndWithdraw(
+        address indexed user, uint256 collateralRemoved, IController.Receipt[] repaymentData
+    );
+
     constructor(address controller) Policy(controller) {
         TOKEN = address(IController(controller).TOKEN());
         KERNEL = IController(controller).KERNEL();
@@ -51,6 +60,7 @@ contract BorrowPolicy is Policy {
             IBorrower.ActionData({collateralAmount: amount, receipts: new IController.Receipt[](0)});
         bytes memory encodedData = abi.encode(data);
         borrowerModule.executeBorrowAction(IBorrower.Action.Deposit, user, encodedData);
+        emit Borrower__Deposit(user, amount);
     }
 
     function withdraw(uint256 amount) external {
@@ -59,18 +69,21 @@ contract BorrowPolicy is Policy {
             IBorrower.ActionData({collateralAmount: amount, receipts: new IController.Receipt[](0)});
         bytes memory encodedData = abi.encode(data);
         borrowerModule.executeBorrowAction(IBorrower.Action.Withdraw, user, encodedData);
+        emit Borrower__Withdraw(user, amount);
     }
 
     function depositAndBorrow(uint256 amount, IController.Receipt[] calldata assets) external {
         validateAssets(assets, _assets());
         IBorrower.ActionData memory data = IBorrower.ActionData({collateralAmount: amount, receipts: assets});
         borrowerModule.executeBorrowAction(IBorrower.Action.DepositAndBorrow, msg.sender, abi.encode(data));
+        emit Borrower__DepositAndBorrow(msg.sender, amount, assets);
     }
 
     function repayAndWithdraw(IController.Receipt[] calldata assets, uint256 amount) external {
         validateAssets(assets, _assets());
         IBorrower.ActionData memory data = IBorrower.ActionData({collateralAmount: amount, receipts: assets});
         borrowerModule.executeBorrowAction(IBorrower.Action.RepayAndWithdraw, msg.sender, abi.encode(data));
+        emit Borrower__RepayAndWithdraw(msg.sender, amount, assets);
     }
 
     function borrow(IController.Receipt[] calldata receipts) external {
@@ -80,12 +93,14 @@ contract BorrowPolicy is Policy {
         IBorrower.ActionData memory data = IBorrower.ActionData({collateralAmount: 0, receipts: receipts});
         bytes memory encodedData = abi.encode(data);
         borrowerModule.executeBorrowAction(IBorrower.Action.Borrow, msg.sender, encodedData);
+        emit Borrower__Borrow(msg.sender, receipts);
     }
 
     function repay(IController.Receipt[] calldata receipts) external {
         validateAssets(receipts, _assets());
         IBorrower.ActionData memory data = IBorrower.ActionData({collateralAmount: 0, receipts: receipts});
         borrowerModule.executeBorrowAction(IBorrower.Action.Repay, msg.sender, abi.encode(data));
+        emit Borrower__Repay(msg.sender, receipts);
     }
 
     function repayAll() external {
@@ -110,6 +125,7 @@ contract BorrowPolicy is Policy {
 
         IBorrower.ActionData memory data = IBorrower.ActionData({collateralAmount: 0, receipts: receipts});
         borrowerModule.executeBorrowAction(IBorrower.Action.Repay, msg.sender, abi.encode(data));
+        emit Borrower__Repay(msg.sender, receipts);
     }
 
     function borrowMax() external {
@@ -118,6 +134,7 @@ contract BorrowPolicy is Policy {
 
         IBorrower.ActionData memory data = IBorrower.ActionData({collateralAmount: 0, receipts: receipts});
         borrowerModule.executeBorrowAction(IBorrower.Action.Borrow, user, abi.encode(data));
+        emit Borrower__Borrow(msg.sender, receipts);
     }
 
     function borrowable(address user) external view returns (IController.Receipt[] memory receipts) {
@@ -128,9 +145,10 @@ contract BorrowPolicy is Policy {
         debt = _debtForAsset(userPosition(user), asset);
     }
 
-    function totalCollateral() external view returns (uint256 collateral) {
+    function totalCollateral(address asset) external view returns (uint256 collateral) {
         // TODO: Correct this in main repo as it is not spelled correctly.
-        collateral = uint256(KERNEL.viewData(Slots.TOTAL_COLLATERL_SLOT));
+        bytes32 slot = Slots.slots(Slots.TOTAL_COLLATERL_SLOT, asset);
+        collateral = uint256(KERNEL.viewData(slot));
     }
 
     function borrowableForAsset(address user, address asset) external view returns (uint256) {

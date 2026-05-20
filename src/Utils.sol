@@ -78,12 +78,12 @@ function backingPerToken(IKernel kernel, uint256 totalSupply) view returns (ICon
     if (assetsLength == 0) return backings;
 
     bytes memory rawAssetData = kernel.viewData(Slots.ASSETS_BASE_SLOT, assetsLength);
-    address[] memory assets = decodeAddresses(rawAssetData);
+    address[] memory assetList = decodeAddresses(rawAssetData);
 
     bytes32[] memory slotsToRead = new bytes32[](assetsLength * 2);
 
     for (uint256 i; i < assetsLength;) {
-        address asset = assets[i];
+        address asset = assetList[i];
         backings[i].asset = asset;
 
         uint256 offset = i * 2;

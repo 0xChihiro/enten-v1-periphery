@@ -853,6 +853,56 @@ contract BorrowerTest is Test {
         assertEq(_bucketValue(IVault.Bucket.Borrow, address(secondAsset)), 0);
     }
 
+    function testWithdrawWithReceiptsRevertsBeforeAccountingDesync() public {
+        _seedBacking(asset, INITIAL_SUPPLY);
+        _depositCollateral(100 ether);
+        _execute(IBorrower.Action.Borrow, user, 0, _oneReceipt(address(asset), 40 ether));
+        _approveAsset(user, asset, 10 ether);
+
+        vm.expectRevert(IBorrower.Borrower__UseRepayAndWithdraw.selector);
+        _execute(IBorrower.Action.Withdraw, user, 10 ether, _oneReceipt(address(asset), 10 ether));
+
+        IBorrower.UserPosition memory position = borrower.positions(user);
+        assertEq(position.collateral, 100 ether);
+        assertEq(position.debt.length, 1);
+        assertEq(position.debt[0].amount, 40 ether);
+        assertEq(_bucketValue(IVault.Bucket.Borrow, address(asset)), 40 ether);
+        assertEq(_bucketValue(IVault.Bucket.Redeem, address(asset)), INITIAL_SUPPLY - 40 ether);
+        assertEq(_bucketValue(IVault.Bucket.Collateral, address(token)), 100 ether);
+    }
+
+    function testBorrowWithCollateralAmountRevertsBeforeStateChanges() public {
+        _seedBacking(asset, INITIAL_SUPPLY);
+        _depositCollateral(100 ether);
+        _approveToken(user, 1 ether);
+
+        vm.expectRevert(IBorrower.Borrower__CollateralNotAllowed.selector);
+        _execute(IBorrower.Action.Borrow, user, 1 ether, _oneReceipt(address(asset), 10 ether));
+
+        IBorrower.UserPosition memory position = borrower.positions(user);
+        assertEq(position.collateral, 100 ether);
+        assertEq(position.debt.length, 0);
+        assertEq(asset.balanceOf(user), 0);
+        assertEq(_bucketValue(IVault.Bucket.Borrow, address(asset)), 0);
+    }
+
+    function testRepayWithCollateralAmountRevertsBeforeStateChanges() public {
+        _seedBacking(asset, INITIAL_SUPPLY);
+        _depositCollateral(100 ether);
+        _execute(IBorrower.Action.Borrow, user, 0, _oneReceipt(address(asset), 40 ether));
+        _approveAsset(user, asset, 10 ether);
+
+        vm.expectRevert(IBorrower.Borrower__CollateralNotAllowed.selector);
+        _execute(IBorrower.Action.Repay, user, 1 ether, _oneReceipt(address(asset), 10 ether));
+
+        IBorrower.UserPosition memory position = borrower.positions(user);
+        assertEq(position.collateral, 100 ether);
+        assertEq(position.debt.length, 1);
+        assertEq(position.debt[0].amount, 40 ether);
+        assertEq(asset.balanceOf(user), 40 ether);
+        assertEq(_bucketValue(IVault.Bucket.Borrow, address(asset)), 40 ether);
+    }
+
     function testDepositWithReceiptsRequiresDepositAndBorrowAction() public {
         _seedBacking(asset, INITIAL_SUPPLY);
         _approveToken(user, 100 ether);

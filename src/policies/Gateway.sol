@@ -108,9 +108,9 @@ contract Gateway is Policy, AccessControl {
     }
 
     function isDuplicate(address asset) internal view returns (bool) {
-        address[] memory assets = assets(KERNEL);
-        for (uint256 i = 0; i < assets.length;) {
-            if (asset == assets[i]) {
+        address[] memory assetList = assets(KERNEL);
+        for (uint256 i = 0; i < assetList.length;) {
+            if (asset == assetList[i]) {
                 return true;
             }
 

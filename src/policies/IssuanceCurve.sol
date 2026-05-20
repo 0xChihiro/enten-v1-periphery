@@ -160,6 +160,7 @@ contract IssuanceCurve is Policy, ICurve {
         whenLive
         returns (BuyQuote memory quote)
     {
+        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp > deadline) revert Curve__Expired();
 
         quote = _buyExactEth(msg.value, minMintAmount);
@@ -172,6 +173,7 @@ contract IssuanceCurve is Policy, ICurve {
         whenLive
         returns (BuyQuote memory quote)
     {
+        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp > deadline) revert Curve__Expired();
 
         quote = quoteBuyExactTokens(mintAmount);

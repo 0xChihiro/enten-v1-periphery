@@ -26,6 +26,7 @@ contract Borrower is IBorrower, BRWRv1 {
     function executeBorrowAction(Action action, address user, bytes calldata data) external override permissioned {
         (UserPosition memory position, uint256 userSlot) = _getPosition(user);
         ActionData memory actionData = abi.decode(data, (ActionData));
+        _validateActionData(action, actionData);
         UserPosition memory updatedPosition = _buildUpdatedPosition(action, position, actionData);
         _validatePosition(updatedPosition);
         IController.StateUpdate[] memory positionUpdates = _updatedSlots(position, updatedPosition, userSlot);
@@ -42,7 +43,6 @@ contract Borrower is IBorrower, BRWRv1 {
             datas[0] = settlement;
             CONTROLLER.settle(datas);
         } else if (action == Action.Deposit) {
-            if (actionData.receipts.length != 0) revert Borrower__UseDepositAndBorrow();
             IController.Settlement memory settlement = IController.Settlement({
                 payer: user,
                 amount: actionData.collateralAmount,
@@ -109,6 +109,16 @@ contract Borrower is IBorrower, BRWRv1 {
 
     function positions(address user) external view returns (UserPosition memory position) {
         (position,) = _getPosition(user);
+    }
+
+    function _validateActionData(Action action, ActionData memory actionData) internal pure {
+        if (action == Action.Deposit) {
+            if (actionData.receipts.length != 0) revert Borrower__UseDepositAndBorrow();
+        } else if (action == Action.Withdraw) {
+            if (actionData.receipts.length != 0) revert Borrower__UseRepayAndWithdraw();
+        } else if (action == Action.Borrow || action == Action.Repay) {
+            if (actionData.collateralAmount != 0) revert Borrower__CollateralNotAllowed();
+        }
     }
 
     /*
