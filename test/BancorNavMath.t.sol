@@ -5,6 +5,30 @@ import {Test} from "forge-std/Test.sol";
 import {BancorNavMath} from "../src/libraries/BancorNavMath.sol";
 
 contract BancorNavMathHarness {
+    function requiredBackingInWad(BancorNavMath.PricingContext memory context, uint256 mintAmount)
+        external
+        pure
+        returns (uint256 requiredBackingWad, uint256 curveReserveDeltaWad, bool usesNavFloor)
+    {
+        return BancorNavMath.requiredBackingInWad(context, mintAmount);
+    }
+
+    function mintAmountForBackingWad(
+        BancorNavMath.PricingContext memory context,
+        uint256 maxMintAmount,
+        uint256 backingInWad
+    ) external pure returns (uint256 mintAmount, uint256 curveReserveDeltaWad, bool usesNavFloor) {
+        return BancorNavMath.mintAmountForBackingWad(context, maxMintAmount, backingInWad);
+    }
+
+    function curveReserveDeltaForMint(uint256 supply, uint256 mintAmount, uint256 reserve, uint8 shape)
+        external
+        pure
+        returns (uint256)
+    {
+        return BancorNavMath.curveReserveDeltaForMint(supply, mintAmount, reserve, shape);
+    }
+
     function boundedCurveStateReductionForBurn(
         BancorNavMath.PricingContext memory context,
         uint256 curveBurnAmount,
@@ -40,6 +64,99 @@ contract BancorNavMathBurnAdjustmentTest is Test {
 
     function setUp() public {
         math = new BancorNavMathHarness();
+    }
+
+    function testRequiredBackingChoosesBancorPathWhenCurvePriceExceedsNavFloor() public view {
+        BancorNavMath.PricingContext memory context = BancorNavMath.PricingContext({
+            virtualSupply: 1_000 ether,
+            curveReserveWad: 1_000 ether,
+            actualSupply: 1_000 ether,
+            backingBalanceWad: 100 ether,
+            navPremiumBps: NAV_PREMIUM_BPS,
+            shape: LINEAR
+        });
+        uint256 mintAmount = 25 ether;
+
+        (uint256 requiredBacking, uint256 curveReserveDelta, bool usesNavFloor) =
+            math.requiredBackingInWad(context, mintAmount);
+
+        assertEq(requiredBacking, curveReserveDelta);
+        assertFalse(usesNavFloor);
+        assertGt(curveReserveDelta, 0);
+    }
+
+    function testRequiredBackingChoosesNavFloorWhenFloorExceedsCurveRequirement() public view {
+        BancorNavMath.PricingContext memory context = BancorNavMath.PricingContext({
+            virtualSupply: 1_000 ether,
+            curveReserveWad: 100 ether,
+            actualSupply: 1_000 ether,
+            backingBalanceWad: 1_000 ether,
+            navPremiumBps: NAV_PREMIUM_BPS,
+            shape: LINEAR
+        });
+        uint256 mintAmount = 25 ether;
+
+        (uint256 requiredBacking, uint256 curveReserveDelta, bool usesNavFloor) =
+            math.requiredBackingInWad(context, mintAmount);
+
+        assertEq(requiredBacking, 26.25 ether);
+        assertGt(requiredBacking, curveReserveDelta);
+        assertTrue(usesNavFloor);
+    }
+
+    function testMintAmountForBackingReturnsLargestSafeMintAmountAtBoundary() public view {
+        BancorNavMath.PricingContext memory context = BancorNavMath.PricingContext({
+            virtualSupply: 1_000 ether,
+            curveReserveWad: 100 ether,
+            actualSupply: 1_000 ether,
+            backingBalanceWad: 1_000 ether,
+            navPremiumBps: NAV_PREMIUM_BPS,
+            shape: LINEAR
+        });
+        uint256 targetMintAmount = 25 ether;
+        (uint256 exactBacking,,) = math.requiredBackingInWad(context, targetMintAmount);
+
+        (uint256 mintAmount,, bool usesNavFloor) = math.mintAmountForBackingWad(context, 100 ether, exactBacking);
+        (uint256 oneWeiShortMintAmount,,) = math.mintAmountForBackingWad(context, 100 ether, exactBacking - 1);
+
+        assertEq(mintAmount, targetMintAmount);
+        assertTrue(usesNavFloor);
+        assertEq(oneWeiShortMintAmount, targetMintAmount - 1);
+    }
+
+    function testFuzzMintQuoteFunctionsAreMonotonicAndConservative(
+        uint96 virtualSupplyRaw,
+        uint96 virtualReserveRaw,
+        uint96 actualSupplyRaw,
+        uint96 backingRaw,
+        uint96 backingInRaw,
+        uint8 shape
+    ) public view {
+        uint256 virtualSupply = bound(uint256(virtualSupplyRaw), 1 ether, 1_000_000 ether);
+        uint256 virtualReserve = bound(uint256(virtualReserveRaw), 1 ether, 1_000_000 ether);
+        uint256 actualSupply = bound(uint256(actualSupplyRaw), 1 ether, 1_000_000 ether);
+        uint256 backing = bound(uint256(backingRaw), 0, 1_000_000 ether);
+        uint256 backingIn = bound(uint256(backingInRaw), 1, 10_000 ether);
+        uint256 maxMintAmount = 1_000 ether;
+        BancorNavMath.PricingContext memory context = BancorNavMath.PricingContext({
+            virtualSupply: virtualSupply,
+            curveReserveWad: virtualReserve,
+            actualSupply: actualSupply,
+            backingBalanceWad: backing,
+            navPremiumBps: NAV_PREMIUM_BPS,
+            shape: shape
+        });
+
+        (uint256 mintAmount,,) = math.mintAmountForBackingWad(context, maxMintAmount, backingIn);
+        (uint256 largerMintAmount,,) = math.mintAmountForBackingWad(context, maxMintAmount, backingIn + 1 ether);
+
+        assertGe(largerMintAmount, mintAmount);
+        (uint256 requiredBacking,,) = math.requiredBackingInWad(context, mintAmount);
+        assertLe(requiredBacking, backingIn);
+        if (mintAmount < maxMintAmount) {
+            (uint256 nextRequiredBacking,,) = math.requiredBackingInWad(context, mintAmount + 1);
+            assertGt(nextRequiredBacking, backingIn);
+        }
     }
 
     function testBurnAdjustmentUsesFullEffectiveBurnWhenCurveRemainsAbovePostBurnNavFloor() public view {
