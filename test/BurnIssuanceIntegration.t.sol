@@ -17,6 +17,7 @@ import {Slots} from "enten-v1/libraries/Slots.sol";
 import {Actions, Keycode} from "enten-v1/Utils.sol";
 
 import {ERC20} from "openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {Math} from "openzeppelin/contracts/utils/math/Math.sol";
 import {Test} from "forge-std/Test.sol";
 
 contract BurnIssuanceIntegrationWETH is ERC20 {
@@ -173,6 +174,74 @@ contract BurnIssuanceIntegrationTest is Test {
         assertGt(quote.grossEthIn, 0);
     }
 
+    function testFuzzBurnAppliesExpectedLockedEffectiveAndCurveDeltas(
+        uint96 amountRaw,
+        uint96 lockedRaw,
+        uint96 virtualReserveRaw
+    ) public {
+        uint256 burnAmount = bound(uint256(amountRaw), 1, 100 ether);
+        uint256 lockedBefore = uint256(lockedRaw) % 300 ether;
+        uint256 virtualReserve = bound(uint256(virtualReserveRaw), 1_500 ether, 3_000 ether);
+        _setLocked(lockedBefore);
+        _overwriteCurveState(1_000 ether, virtualReserve);
+        vm.prank(existingHolder);
+        assertTrue(token.transfer(buyer, burnAmount));
+
+        uint256 totalSupplyBefore = token.totalSupply();
+        uint256 effectiveBefore = _effectiveSupply();
+        uint256 backingBefore = curve.reserveBackingBalanceWad();
+        ICurve.CurveState memory stateBefore = curve.curveState();
+        uint256 unlocked = Math.min(burnAmount, lockedBefore);
+        uint256 effectiveBurn = burnAmount - unlocked;
+        BancorNavMath.PricingContext memory context = BancorNavMath.PricingContext({
+            virtualSupply: stateBefore.virtualSupplyWad,
+            curveReserveWad: stateBefore.virtualReserveWad,
+            actualSupply: effectiveBefore,
+            backingBalanceWad: backingBefore,
+            navPremiumBps: MIN_NAV_PREMIUM_BPS,
+            shape: uint8(ICurve.CurveShape.SquareRoot)
+        });
+        (uint256 expectedCurveSupplyDelta, uint256 expectedCurveReserveDelta) =
+            BancorNavMath.boundedCurveStateReductionForBurn(context, burnAmount, effectiveBefore - effectiveBurn);
+
+        vm.prank(buyer);
+        burnerPolicy.burn(burnAmount);
+
+        ICurve.CurveState memory stateAfter = curve.curveState();
+        assertEq(token.totalSupply(), totalSupplyBefore - burnAmount);
+        assertEq(_locked(), lockedBefore - unlocked);
+        assertEq(_effectiveSupply(), effectiveBefore - effectiveBurn);
+        assertEq(curve.reserveBackingBalanceWad(), backingBefore);
+        assertEq(stateAfter.virtualSupplyWad, stateBefore.virtualSupplyWad - expectedCurveSupplyDelta);
+        assertEq(stateAfter.virtualReserveWad, stateBefore.virtualReserveWad - expectedCurveReserveDelta);
+        _assertSpotAtOrAboveNavFloor();
+    }
+
+    function testQuoteExecutionExactTokensMatchesAfterLockedOnlyBurn() public {
+        _setLocked(100 ether);
+        _transferAndBurnFromBuyer(40 ether);
+
+        assertEq(_locked(), 60 ether);
+        _assertQuoteBuyExactTokensExecutesFromCurrentState(12 ether);
+    }
+
+    function testQuoteExecutionExactEthMatchesAfterPartialLockedBurn() public {
+        _setLocked(15 ether);
+        _transferAndBurnFromBuyer(40 ether);
+
+        assertEq(_locked(), 0);
+        _assertQuoteBuyExactEthExecutesFromCurrentState(30 ether);
+    }
+
+    function testQuoteExecutionMatchesAfterNavFloorStoppedBurn() public {
+        _overwriteCurveState(1_000 ether, 720 ether);
+        _transferAndBurnFromBuyer(20 ether);
+
+        _assertSpotAtOrAboveNavFloor();
+        _assertQuoteBuyExactTokensExecutesFromCurrentState(1 ether);
+        _assertQuoteBuyExactEthExecutesFromCurrentState(2 ether);
+    }
+
     function _buyExactTokens(uint256 mintAmount) internal returns (ICurve.BuyQuote memory quote) {
         quote = curve.quoteBuyExactTokens(mintAmount);
         vm.deal(buyer, quote.grossEthIn);
@@ -183,6 +252,60 @@ contract BurnIssuanceIntegrationTest is Test {
         assertEq(actualQuote.mintAmount, quote.mintAmount);
         assertEq(actualQuote.curveReserveDeltaWad, quote.curveReserveDeltaWad);
         assertEq(actualQuote.curveSupplyDeltaWad, quote.curveSupplyDeltaWad);
+    }
+
+    function _transferAndBurnFromBuyer(uint256 burnAmount) internal {
+        vm.prank(existingHolder);
+        assertTrue(token.transfer(buyer, burnAmount));
+        vm.prank(buyer);
+        burnerPolicy.burn(burnAmount);
+    }
+
+    function _assertQuoteBuyExactTokensExecutesFromCurrentState(uint256 mintAmount) internal {
+        ICurve.BuyQuote memory quote = curve.quoteBuyExactTokens(mintAmount);
+        ICurve.CurveState memory stateBefore = curve.curveState();
+        uint256 backingBefore = curve.reserveBackingBalanceWad();
+
+        vm.deal(buyer, quote.grossEthIn);
+        vm.prank(buyer);
+        ICurve.BuyQuote memory actualQuote =
+            curve.buyExactTokensWithEth{value: quote.grossEthIn}(mintAmount, block.timestamp);
+
+        assertEq(actualQuote.grossEthIn, quote.grossEthIn);
+        assertEq(actualQuote.mintAmount, quote.mintAmount);
+        assertEq(actualQuote.curveReserveDeltaWad, quote.curveReserveDeltaWad);
+        assertEq(actualQuote.curveSupplyDeltaWad, quote.curveSupplyDeltaWad);
+        assertEq(curve.curveState().virtualSupplyWad, stateBefore.virtualSupplyWad + quote.curveSupplyDeltaWad);
+        assertEq(curve.curveState().virtualReserveWad, stateBefore.virtualReserveWad + quote.curveReserveDeltaWad);
+        assertEq(curve.reserveBackingBalanceWad(), backingBefore + _backingAmountFromGross(quote.grossEthIn));
+        _assertSpotAtOrAboveNavFloor();
+    }
+
+    function _assertQuoteBuyExactEthExecutesFromCurrentState(uint256 ethIn) internal {
+        ICurve.BuyQuote memory quote = curve.quoteBuyExactEth(ethIn);
+        ICurve.CurveState memory stateBefore = curve.curveState();
+        uint256 backingBefore = curve.reserveBackingBalanceWad();
+
+        vm.deal(buyer, ethIn);
+        vm.prank(buyer);
+        ICurve.BuyQuote memory actualQuote = curve.buyExactEth{value: ethIn}(quote.mintAmount, block.timestamp);
+
+        assertEq(actualQuote.grossEthIn, quote.grossEthIn);
+        assertEq(actualQuote.mintAmount, quote.mintAmount);
+        assertEq(actualQuote.curveReserveDeltaWad, quote.curveReserveDeltaWad);
+        assertEq(actualQuote.curveSupplyDeltaWad, quote.curveSupplyDeltaWad);
+        assertEq(curve.curveState().virtualSupplyWad, stateBefore.virtualSupplyWad + quote.curveSupplyDeltaWad);
+        assertEq(curve.curveState().virtualReserveWad, stateBefore.virtualReserveWad + quote.curveReserveDeltaWad);
+        assertEq(curve.reserveBackingBalanceWad(), backingBefore + _backingAmountFromGross(quote.grossEthIn));
+        _assertSpotAtOrAboveNavFloor();
+    }
+
+    function _backingAmountFromGross(uint256 grossAmount) internal view returns (uint256 backingAmount) {
+        uint256 protocolFee = Math.mulDiv(grossAmount, curve.PROTOCOL_FEE_BPS(), 10_000, Math.Rounding.Ceil);
+        uint256 netAmount = grossAmount - protocolFee;
+        uint256 teamAmount = netAmount * TEAM_BPS / 10_000;
+        uint256 treasuryAmount = netAmount * TREASURY_BPS / 10_000;
+        backingAmount = netAmount - teamAmount - treasuryAmount;
     }
 
     function _assertSpotAtOrAboveNavFloor() internal view {

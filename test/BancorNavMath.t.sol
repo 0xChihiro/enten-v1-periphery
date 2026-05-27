@@ -2,6 +2,7 @@
 pragma solidity 0.8.34;
 
 import {Test} from "forge-std/Test.sol";
+import {Math} from "openzeppelin/contracts/utils/math/Math.sol";
 import {BancorNavMath} from "../src/libraries/BancorNavMath.sol";
 
 contract BancorNavMathHarness {
@@ -159,6 +160,121 @@ contract BancorNavMathBurnAdjustmentTest is Test {
         }
     }
 
+    function testFuzzRequiredBackingIsMonotonicAndSelectionFlagIsExact(
+        uint96 virtualSupplyRaw,
+        uint96 virtualReserveRaw,
+        uint96 actualSupplyRaw,
+        uint96 backingRaw,
+        uint96 mintAmountARaw,
+        uint96 mintAmountBRaw,
+        uint8 shapeRaw
+    ) public view {
+        uint256 mintA = bound(uint256(mintAmountARaw), 1, 500 ether);
+        uint256 mintB = bound(uint256(mintAmountBRaw), mintA, 1_000 ether);
+        BancorNavMath.PricingContext memory context = BancorNavMath.PricingContext({
+            virtualSupply: bound(uint256(virtualSupplyRaw), 1 ether, 1_000_000 ether),
+            curveReserveWad: bound(uint256(virtualReserveRaw), 1 ether, 1_000_000 ether),
+            actualSupply: bound(uint256(actualSupplyRaw), 1 ether, 1_000_000 ether),
+            backingBalanceWad: bound(uint256(backingRaw), 0, 1_000_000 ether),
+            navPremiumBps: NAV_PREMIUM_BPS,
+            shape: _shape(shapeRaw)
+        });
+
+        (uint256 requiredA, uint256 curveDeltaA, bool usesFloorA) = math.requiredBackingInWad(context, mintA);
+        (uint256 requiredB, uint256 curveDeltaB,) = math.requiredBackingInWad(context, mintB);
+        uint256 navRequirementA = BancorNavMath.navFloorBackingInWad(
+            context.actualSupply, mintA, context.backingBalanceWad, context.navPremiumBps
+        );
+
+        assertLe(requiredA, requiredB);
+        assertLe(curveDeltaA, curveDeltaB);
+        assertEq(requiredA, Math.max(curveDeltaA, navRequirementA));
+        assertEq(usesFloorA, navRequirementA > curveDeltaA);
+    }
+
+    function testFuzzCurveMintThenBurnIsConservativeInverse(
+        uint96 supplyRaw,
+        uint96 reserveRaw,
+        uint96 mintRaw,
+        uint8 shapeRaw
+    ) public view {
+        uint256 supply = bound(uint256(supplyRaw), 1 ether, 1_000_000 ether);
+        uint256 reserve = bound(uint256(reserveRaw), 1 ether, 1_000_000 ether);
+        uint256 mintAmount = bound(uint256(mintRaw), 1, supply / 2);
+        uint8 shape = _shape(shapeRaw);
+
+        uint256 mintReserveDelta = math.curveReserveDeltaForMint(supply, mintAmount, reserve, shape);
+        (uint256 burnSupplyDelta, uint256 burnReserveDelta) =
+            math.curveStateReductionForBurn(supply + mintAmount, reserve + mintReserveDelta, mintAmount, shape);
+
+        assertEq(burnSupplyDelta, mintAmount);
+
+        uint256 finalSupply = supply + mintAmount - burnSupplyDelta;
+        uint256 finalReserve = reserve + mintReserveDelta - burnReserveDelta;
+        assertEq(finalSupply, supply);
+        assertApproxEqAbs(finalReserve, reserve, _inverseRoundTripTolerance(reserve));
+
+        uint256 originalSpot = math.spot(supply, reserve, shape);
+        uint256 finalSpot = math.spot(finalSupply, finalReserve, shape);
+        assertApproxEqAbs(finalSpot, originalSpot, _inverseRoundTripTolerance(originalSpot));
+    }
+
+    function testSpotFormulaMatchesReserveRatioForAllShapes() public view {
+        uint256 supply = 800 ether;
+        uint256 reserve = 1_200 ether;
+
+        assertEq(math.spot(supply, reserve, FOURTH_ROOT), Math.mulDiv(reserve, 5 ether, supply * 4, Math.Rounding.Ceil));
+        assertEq(math.spot(supply, reserve, SQUARE_ROOT), Math.mulDiv(reserve, 3 ether, supply * 2, Math.Rounding.Ceil));
+        assertEq(math.spot(supply, reserve, LINEAR), Math.mulDiv(reserve, 2 ether, supply, Math.Rounding.Ceil));
+    }
+
+    function testFuzzBoundedBurnReductionIsLargestSafeReduction(
+        uint96 reserveRaw,
+        uint96 backingRaw,
+        uint96 burnRaw,
+        uint8 shapeRaw
+    ) public view {
+        uint256 actualSupply = 1_000 ether;
+        uint256 virtualSupply = 1_000 ether;
+        uint256 burnAmount = bound(uint256(burnRaw), 1, 150 ether);
+        uint8 shape = _shape(shapeRaw);
+        BancorNavMath.PricingContext memory context = BancorNavMath.PricingContext({
+            virtualSupply: virtualSupply,
+            curveReserveWad: bound(uint256(reserveRaw), 1 ether, 2_000 ether),
+            actualSupply: actualSupply,
+            backingBalanceWad: bound(uint256(backingRaw), 1 ether, 2_000 ether),
+            navPremiumBps: NAV_PREMIUM_BPS,
+            shape: shape
+        });
+        uint256 postBurnActualSupply = actualSupply - Math.min(burnAmount, 500 ether);
+
+        uint256 currentSpot = math.spot(context.virtualSupply, context.curveReserveWad, shape);
+        uint256 postBurnNavFloor = math.navFloor(postBurnActualSupply, context.backingBalanceWad, context.navPremiumBps);
+        (uint256 supplyDelta, uint256 reserveDelta) =
+            math.boundedCurveStateReductionForBurn(context, burnAmount, postBurnActualSupply);
+
+        if (currentSpot <= postBurnNavFloor) {
+            assertEq(supplyDelta, 0);
+            assertEq(reserveDelta, 0);
+            return;
+        }
+
+        if (supplyDelta > 0) {
+            uint256 postSpot = math.spot(virtualSupply - supplyDelta, context.curveReserveWad - reserveDelta, shape);
+            assertGe(postSpot, postBurnNavFloor);
+        }
+
+        uint256 upperBound = Math.min(burnAmount, virtualSupply);
+        if (postBurnNavFloor > 0 && upperBound == virtualSupply) upperBound = virtualSupply - 1;
+        if (supplyDelta < upperBound) {
+            (uint256 nextSupplyDelta, uint256 nextReserveDelta) =
+                math.curveStateReductionForBurn(virtualSupply, context.curveReserveWad, supplyDelta + 1, shape);
+            uint256 nextSpot =
+                math.spot(virtualSupply - nextSupplyDelta, context.curveReserveWad - nextReserveDelta, shape);
+            assertLt(nextSpot, postBurnNavFloor);
+        }
+    }
+
     function testBurnAdjustmentUsesFullEffectiveBurnWhenCurveRemainsAbovePostBurnNavFloor() public view {
         BancorNavMath.PricingContext memory context = BancorNavMath.PricingContext({
             virtualSupply: 1_000 ether,
@@ -295,5 +411,13 @@ contract BancorNavMathBurnAdjustmentTest is Test {
 
         vm.expectRevert(BancorNavMath.BancorNavMath__InvalidSupply.selector);
         math.boundedCurveStateReductionForBurn(context, 100 ether, 0);
+    }
+
+    function _shape(uint8 rawShape) internal pure returns (uint8) {
+        return rawShape % 3;
+    }
+
+    function _inverseRoundTripTolerance(uint256 value) internal pure returns (uint256) {
+        return Math.max(1_000, value / 1_000_000_000_000);
     }
 }
