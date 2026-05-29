@@ -8,15 +8,26 @@ import {backingPerToken} from "../Utils.sol";
 import {IKernel} from "enten-v1/interfaces/IKernel.sol";
 import {IController} from "enten-v1/interfaces/IController.sol";
 import {IToken} from "enten-v1/interfaces/IToken.sol";
+import {Slots} from "enten-v1/libraries/Slots.sol";
 import {MINTR} from "../modules/MINTR/MINTR.v1.sol";
+import {Math} from "openzeppelin/contracts/utils/math/Math.sol";
+
+interface ITokenSupply {
+    function MAX_SUPPLY() external view returns (uint256);
+}
+
+interface IControllerFeeView {
+    function BPS() external view returns (uint256);
+    function AUCTION_FEE_BPS() external view returns (uint256);
+}
 
 /**
  * @title Auction
  * @author 0xChihiro
  * @notice A Dutch auction contract for selling newly minted tokens in exchange for assets.
- *         The price decays linearly from initPrice to a minimum scalar price over each epoch. When purchased,
+ *         The price decays linearly from the configured multiplier to a minimum scalar price over each epoch. When purchased,
  *         a call is sent to the accompanying module to mint new tokens and send them to the buyer.
- *         A new auction begins with a price based on the previous sales.
+ *         A new auction resets the lot and decay clock while pricing continues from current backing.
  * @dev Forked and modified from Euler Fee Flow, then further modified from heesho's version.
  */
 contract Auction is ReentrancyGuard, Policy {
@@ -29,8 +40,6 @@ contract Auction is ReentrancyGuard, Policy {
     uint256 public constant MAX_EPOCH_PERIOD = 365 days;
     uint256 public constant MIN_PRICE_MULTIPLIER = 1.1e18; // 1.1x minimum
     uint256 public constant MAX_PRICE_MULTIPLIER = 3e18; // 3x maximum
-    uint256 public constant ABS_MIN_INIT_PRICE = 1e6;
-    uint256 public constant ABS_MAX_INIT_PRICE = type(uint192).max;
     uint256 public constant PRICE_MULTIPLIER_SCALE = 1e18;
 
     /*----------  IMMUTABLES  -------------------------------------------*/
@@ -44,7 +53,6 @@ contract Auction is ReentrancyGuard, Policy {
     /*----------  STATE  ------------------------------------------------*/
 
     uint256 public epochId; // current epoch counter
-    uint256 public initPrice; // starting price for current epoch
     uint256 public startTime; // timestamp when current epoch began
     MINTR public minter; // Associated Minter Module that goes with the Auction
     uint256 public remainingLot; // Remaining lot size of the current auction
@@ -52,10 +60,13 @@ contract Auction is ReentrancyGuard, Policy {
     /*----------  ERRORS  -----------------------------------------------*/
 
     error Auction__DeadlinePassed();
+    error Auction__AuctionExpired();
     error Auction__EpochIdMismatch();
     error Auction__EmptyAssets();
-    error Auction__InitPriceBelowMin();
-    error Auction__InitPriceExceedsMax();
+    error Auction__InvalidMintAmount();
+    error Auction__MaxPaymentAmountExceeded();
+    error Auction__MaxPaymentAssetMismatch();
+    error Auction__MaxPaymentsLengthMismatch();
     error Auction__EpochPeriodBelowMin();
     error Auction__EpochPeriodExceedsMax();
     error Auction__PriceMultiplierBelowMin();
@@ -63,36 +74,31 @@ contract Auction is ReentrancyGuard, Policy {
     error Auction__InvalidLotSize();
     error Auction__TooManyTokens();
     error Auction__OngoingAuction();
+    error Auction__UnseededAsset();
+    error Auction__InvalidFeeConfiguration();
 
     /*----------  EVENTS  -----------------------------------------------*/
 
     event Auction__Buy(address indexed buyer, uint256 epoch, IController.Receipt[] payment, uint256 amountMinted);
+    event Auction__Start(address indexed starter, uint256 epoch, uint256 startTime, uint256 lotSize);
 
     /*----------  CONSTRUCTOR  ------------------------------------------*/
 
     /**
      * @notice Deploy a new Auction contract.
-     * @param _initPrice Starting price for the first epoch
      * @param _lotSize Amount of tokens available in each epoch
      * @param _epochPeriod Duration of each auction epoch
      * @param _priceMultiplier Price multiplier for calculating next epoch's starting price
      */
-    constructor(
-        address controller,
-        uint256 _initPrice,
-        uint256 _lotSize,
-        uint256 _epochPeriod,
-        uint256 _priceMultiplier
-    ) Policy(controller) {
+    constructor(address controller, uint256 _lotSize, uint256 _epochPeriod, uint256 _priceMultiplier)
+        Policy(controller)
+    {
         if (_lotSize == 0) revert Auction__InvalidLotSize();
-        if (_initPrice < ABS_MIN_INIT_PRICE) revert Auction__InitPriceBelowMin();
-        if (_initPrice > ABS_MAX_INIT_PRICE) revert Auction__InitPriceExceedsMax();
         if (_epochPeriod < MIN_EPOCH_PERIOD) revert Auction__EpochPeriodBelowMin();
         if (_epochPeriod > MAX_EPOCH_PERIOD) revert Auction__EpochPeriodExceedsMax();
         if (_priceMultiplier < MIN_PRICE_MULTIPLIER) revert Auction__PriceMultiplierBelowMin();
         if (_priceMultiplier > MAX_PRICE_MULTIPLIER) revert Auction__PriceMultiplierExceedsMax();
 
-        initPrice = _initPrice;
         startTime = block.timestamp;
         LOT_SIZE = _lotSize;
         remainingLot = _lotSize;
@@ -122,23 +128,30 @@ contract Auction is ReentrancyGuard, Policy {
 
     /*----------  EXTERNAL FUNCTIONS  -----------------------------------*/
 
-    /**
-     */
-    function buy(uint256 _epochId, uint256 deadline, uint256 mintAmount)
+    function buy(uint256 _epochId, uint256 deadline, uint256 mintAmount, IController.Receipt[] calldata maxPayments)
         external
         nonReentrant
         returns (IController.Receipt[] memory)
     {
+        uint256 currentEpoch = epochId;
+
         if (block.timestamp > deadline) revert Auction__DeadlinePassed();
-        if (_epochId != epochId) revert Auction__EpochIdMismatch();
+        if (block.timestamp >= startTime + epochPeriod) revert Auction__AuctionExpired();
+        if (_epochId != currentEpoch) revert Auction__EpochIdMismatch();
+        if (mintAmount == 0) revert Auction__InvalidMintAmount();
         if (mintAmount > remainingLot) revert Auction__TooManyTokens();
 
         IController.Backing[] memory backings = getPrice();
         if (backings.length == 0) revert Auction__EmptyAssets();
+        if (maxPayments.length != backings.length) revert Auction__MaxPaymentsLengthMismatch();
         IController.Receipt[] memory receipts = new IController.Receipt[](backings.length);
 
         for (uint256 i = 0; i < backings.length;) {
+            if (maxPayments[i].asset != backings[i].asset) revert Auction__MaxPaymentAssetMismatch();
+
             uint256 paymentAmount = backings[i].backingPerToken * mintAmount / PRICE_MULTIPLIER_SCALE;
+            if (paymentAmount > maxPayments[i].amount) revert Auction__MaxPaymentAmountExceeded();
+
             receipts[i] = IController.Receipt({asset: backings[i].asset, amount: paymentAmount});
             unchecked {
                 i++;
@@ -149,27 +162,30 @@ contract Auction is ReentrancyGuard, Policy {
         remainingLot -= mintAmount;
         minter.mint(msg.sender, mintAmount, receipts, updates);
 
-        if (remainingLot == 0 || block.timestamp > startTime + epochPeriod) {
-            // TODO: check available supply to sell
-            startTime = block.timestamp;
-            remainingLot = LOT_SIZE;
-            unchecked {
-                epochId++;
-            }
-        }
+        emit Auction__Buy(msg.sender, currentEpoch, receipts, mintAmount);
 
-        emit Auction__Buy(msg.sender, epochId, receipts, mintAmount);
+        if (remainingLot == 0) {
+            _startNextAuction();
+        }
 
         return receipts;
     }
-    // TODO: check avaiable supply to actually sell.
-    function startNextAuction() external {
-        if (block.timestamp <= startTime + epochPeriod) revert Auction__OngoingAuction();
-        remainingLot = LOT_SIZE;
+
+    function startNextAuction() external nonReentrant {
+        if (block.timestamp < startTime + epochPeriod) revert Auction__OngoingAuction();
+        _startNextAuction();
+    }
+
+    function _startNextAuction() internal {
+        remainingLot = TOKEN.totalSupply() + LOT_SIZE > ITokenSupply(address(TOKEN)).MAX_SUPPLY()
+            ? ITokenSupply(address(TOKEN)).MAX_SUPPLY() - TOKEN.totalSupply()
+            : LOT_SIZE;
         startTime = block.timestamp;
         unchecked {
             epochId++;
         }
+
+        emit Auction__Start(msg.sender, epochId, startTime, LOT_SIZE);
     }
 
     /*----------  VIEW FUNCTIONS  ---------------------------------------*/
@@ -182,12 +198,27 @@ contract Auction is ReentrancyGuard, Policy {
      */
     function getPrice() public view returns (IController.Backing[] memory backings) {
         uint256 delta = block.timestamp - startTime;
-        uint256 expectedScalar = priceMultiplier - priceMultiplier * delta / epochPeriod;
+        uint256 expectedScalar;
+        if (delta < epochPeriod) {
+            expectedScalar = priceMultiplier - priceMultiplier * delta / epochPeriod;
+        }
         uint256 scalar = expectedScalar > MIN_PRICE_MULTIPLIER ? expectedScalar : MIN_PRICE_MULTIPLIER;
+        uint256 bps = IControllerFeeView(address(CONTROLLER)).BPS();
+        uint256 protocolFeeBps = IControllerFeeView(address(CONTROLLER)).AUCTION_FEE_BPS();
+        uint256 teamBps = uint256(KERNEL.viewData(Slots.TEAM_PERCENTAGE_SLOT));
+        uint256 treasuryBps = uint256(KERNEL.viewData(Slots.TREASURY_PERCENTAGE_SLOT));
+        if (bps == 0 || protocolFeeBps >= bps || teamBps >= bps || treasuryBps >= bps || teamBps + treasuryBps >= bps) {
+            revert Auction__InvalidFeeConfiguration();
+        }
+        uint256 backingBps = bps - teamBps - treasuryBps;
+        uint256 postProtocolBps = bps - protocolFeeBps;
+
         backings = backingPerToken(KERNEL, TOKEN);
         for (uint256 i = 0; i < backings.length;) {
             uint256 scaledBacking = backings[i].backingPerToken * scalar / PRICE_MULTIPLIER_SCALE;
-            backings[i].backingPerToken = scaledBacking > 0 ? scaledBacking : initPrice;
+            if (scaledBacking == 0) revert Auction__UnseededAsset();
+            uint256 requiredPostProtocol = Math.mulDiv(scaledBacking, bps, backingBps, Math.Rounding.Ceil);
+            backings[i].backingPerToken = Math.mulDiv(requiredPostProtocol, bps, postProtocolBps, Math.Rounding.Ceil);
             unchecked {
                 i++;
             }
