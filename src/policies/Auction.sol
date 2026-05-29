@@ -149,7 +149,8 @@ contract Auction is ReentrancyGuard, Policy {
         for (uint256 i = 0; i < backings.length;) {
             if (maxPayments[i].asset != backings[i].asset) revert Auction__MaxPaymentAssetMismatch();
 
-            uint256 paymentAmount = backings[i].backingPerToken * mintAmount / PRICE_MULTIPLIER_SCALE;
+            uint256 paymentAmount =
+                Math.mulDiv(backings[i].backingPerToken, mintAmount, PRICE_MULTIPLIER_SCALE, Math.Rounding.Ceil);
             if (paymentAmount > maxPayments[i].amount) revert Auction__MaxPaymentAmountExceeded();
 
             receipts[i] = IController.Receipt({asset: backings[i].asset, amount: paymentAmount});
@@ -185,7 +186,7 @@ contract Auction is ReentrancyGuard, Policy {
             epochId++;
         }
 
-        emit Auction__Start(msg.sender, epochId, startTime, LOT_SIZE);
+        emit Auction__Start(msg.sender, epochId, startTime, remainingLot);
     }
 
     /*----------  VIEW FUNCTIONS  ---------------------------------------*/
