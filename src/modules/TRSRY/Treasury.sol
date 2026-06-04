@@ -23,7 +23,8 @@ contract Treasury is TRSRY {
                 transition: IController.StateTransitions.Deploy,
                 receipts: receipts,
                 singleStateUpdates: new IController.StateUpdate[](0),
-                multiStateUpdates: new IController.StateUpdates[](0)
+                multiStateUpdates: new IController.StateUpdates[](0),
+                externalCalls: new IController.ExternalCall[](0)
             });
             CONTROLLER.settle(settlements);
         } else if (action == TreasuryAction.Recall) {
@@ -34,7 +35,8 @@ contract Treasury is TRSRY {
                 transition: IController.StateTransitions.Recall,
                 receipts: receipts,
                 singleStateUpdates: new IController.StateUpdate[](0),
-                multiStateUpdates: new IController.StateUpdates[](0)
+                multiStateUpdates: new IController.StateUpdates[](0),
+                externalCalls: new IController.ExternalCall[](0)
             });
             CONTROLLER.settle(settlements);
         } else {

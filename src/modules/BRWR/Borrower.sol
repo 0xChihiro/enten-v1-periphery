@@ -37,7 +37,8 @@ contract Borrower is IBorrower, BRWRv1 {
                 transition: IController.StateTransitions.Borrow,
                 receipts: actionData.receipts,
                 singleStateUpdates: positionUpdates,
-                multiStateUpdates: new IController.StateUpdates[](0)
+                multiStateUpdates: new IController.StateUpdates[](0),
+                externalCalls: new IController.ExternalCall[](0)
             });
             IController.Settlement[] memory datas = new IController.Settlement[](1);
             datas[0] = settlement;
@@ -49,7 +50,8 @@ contract Borrower is IBorrower, BRWRv1 {
                 transition: IController.StateTransitions.Deposit,
                 receipts: actionData.receipts,
                 singleStateUpdates: positionUpdates,
-                multiStateUpdates: new IController.StateUpdates[](0)
+                multiStateUpdates: new IController.StateUpdates[](0),
+                externalCalls: new IController.ExternalCall[](0)
             });
             IController.Settlement[] memory datas = new IController.Settlement[](1);
             datas[0] = settlement;
@@ -61,7 +63,8 @@ contract Borrower is IBorrower, BRWRv1 {
                 transition: IController.StateTransitions.Withdraw,
                 receipts: actionData.receipts,
                 singleStateUpdates: positionUpdates,
-                multiStateUpdates: new IController.StateUpdates[](0)
+                multiStateUpdates: new IController.StateUpdates[](0),
+                externalCalls: new IController.ExternalCall[](0)
             });
             IController.Settlement[] memory datas = new IController.Settlement[](1);
             datas[0] = settlement;
@@ -73,7 +76,8 @@ contract Borrower is IBorrower, BRWRv1 {
                 transition: IController.StateTransitions.Repay,
                 receipts: actionData.receipts,
                 singleStateUpdates: positionUpdates,
-                multiStateUpdates: new IController.StateUpdates[](0)
+                multiStateUpdates: new IController.StateUpdates[](0),
+                externalCalls: new IController.ExternalCall[](0)
             });
             IController.Settlement[] memory datas = new IController.Settlement[](1);
             datas[0] = settlement;
@@ -85,7 +89,8 @@ contract Borrower is IBorrower, BRWRv1 {
                 transition: IController.StateTransitions.Deposit,
                 receipts: actionData.receipts,
                 singleStateUpdates: positionUpdates,
-                multiStateUpdates: new IController.StateUpdates[](0)
+                multiStateUpdates: new IController.StateUpdates[](0),
+                externalCalls: new IController.ExternalCall[](0)
             });
             IController.Settlement[] memory datas = new IController.Settlement[](1);
             datas[0] = settlement;
@@ -97,7 +102,8 @@ contract Borrower is IBorrower, BRWRv1 {
                 transition: IController.StateTransitions.Withdraw,
                 receipts: actionData.receipts,
                 singleStateUpdates: positionUpdates,
-                multiStateUpdates: new IController.StateUpdates[](0)
+                multiStateUpdates: new IController.StateUpdates[](0),
+                externalCalls: new IController.ExternalCall[](0)
             });
             IController.Settlement[] memory datas = new IController.Settlement[](1);
             datas[0] = settlement;

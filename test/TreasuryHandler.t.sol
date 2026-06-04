@@ -466,7 +466,7 @@ contract TreasuryHandlerTest is Test {
         if (bucket == IVault.Bucket.Redeem) return _slot(Slots.BACKING_AMOUNT_SLOT, asset_);
         if (bucket == IVault.Bucket.Treasury) return _slot(Slots.TREASURY_AMOUNT_SLOT, asset_);
         if (bucket == IVault.Bucket.Team) return _slot(Slots.TEAM_AMOUNT_SLOT, asset_);
-        if (bucket == IVault.Bucket.Collateral) return _slot(Slots.TOTAL_COLLATERL_SLOT, asset_);
+        if (bucket == IVault.Bucket.Collateral) return _slot(Slots.TOTAL_COLLATERAL_SLOT, asset_);
         revert("invalid bucket");
     }
 

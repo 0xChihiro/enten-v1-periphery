@@ -49,7 +49,8 @@ contract BurnerModule is BRNER {
                 transition: IController.StateTransitions.Burn,
                 receipts: new IController.Receipt[](0),
                 singleStateUpdates: _burnStateUpdates(amount, unlocked),
-                multiStateUpdates: new IController.StateUpdates[](0)
+                multiStateUpdates: new IController.StateUpdates[](0),
+                externalCalls: new IController.ExternalCall[](0)
             });
             CONTROLLER.settle(settlements);
         } else if (action == Action.Redeem) {
@@ -60,7 +61,8 @@ contract BurnerModule is BRNER {
                 transition: IController.StateTransitions.Redeem,
                 receipts: _getReceipts(amount),
                 singleStateUpdates: new IController.StateUpdate[](0),
-                multiStateUpdates: new IController.StateUpdates[](0)
+                multiStateUpdates: new IController.StateUpdates[](0),
+                externalCalls: new IController.ExternalCall[](0)
             });
             CONTROLLER.settle(settlements);
         } else {

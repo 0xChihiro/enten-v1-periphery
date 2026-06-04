@@ -24,7 +24,8 @@ contract Admin is ADMINv1 {
             transition: IController.StateTransitions.StateUpdate,
             receipts: new IController.Receipt[](0),
             singleStateUpdates: updates,
-            multiStateUpdates: new IController.StateUpdates[](0)
+            multiStateUpdates: new IController.StateUpdates[](0),
+            externalCalls: new IController.ExternalCall[](0)
         });
 
         CONTROLLER.settle(settlements);

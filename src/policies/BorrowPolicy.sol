@@ -146,8 +146,7 @@ contract BorrowPolicy is Policy {
     }
 
     function totalCollateral(address asset) external view returns (uint256 collateral) {
-        // TODO: Correct this in main repo as it is not spelled correctly.
-        bytes32 slot = Slots.slots(Slots.TOTAL_COLLATERL_SLOT, asset);
+        bytes32 slot = Slots.slots(Slots.TOTAL_COLLATERAL_SLOT, asset);
         collateral = uint256(KERNEL.viewData(slot));
     }
 

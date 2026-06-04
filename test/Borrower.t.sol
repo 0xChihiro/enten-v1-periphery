@@ -944,8 +944,8 @@ contract BorrowerTest is Test {
     }
 
     function testBorrowWithoutEnoughVaultBackingRevertsAtomically() public {
-        _setBucket(IVault.Bucket.Redeem, address(asset), INITIAL_SUPPLY);
         _depositCollateral(100 ether);
+        _setBucket(IVault.Bucket.Redeem, address(asset), INITIAL_SUPPLY);
 
         vm.expectRevert();
         _execute(IBorrower.Action.Borrow, user, 0, _oneReceipt(address(asset), 40 ether));
@@ -1162,7 +1162,7 @@ contract BorrowerTest is Test {
         if (bucket == IVault.Bucket.Redeem) return _slot(Slots.BACKING_AMOUNT_SLOT, token_);
         if (bucket == IVault.Bucket.Treasury) return _slot(Slots.TREASURY_AMOUNT_SLOT, token_);
         if (bucket == IVault.Bucket.Team) return _slot(Slots.TEAM_AMOUNT_SLOT, token_);
-        if (bucket == IVault.Bucket.Collateral) return _slot(Slots.TOTAL_COLLATERL_SLOT, token_);
+        if (bucket == IVault.Bucket.Collateral) return _slot(Slots.TOTAL_COLLATERAL_SLOT, token_);
         revert("invalid bucket");
     }
 

@@ -21,7 +21,8 @@ contract Minter is MINTR, IMinter {
             transition: IController.StateTransitions.Payment,
             receipts: receipts,
             singleStateUpdates: updates,
-            multiStateUpdates: new IController.StateUpdates[](0)
+            multiStateUpdates: new IController.StateUpdates[](0),
+            externalCalls: new IController.ExternalCall[](0)
         });
         CONTROLLER.settle(settlements);
     }
