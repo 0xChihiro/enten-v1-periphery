@@ -8,7 +8,6 @@ import {assets} from "../Utils.sol";
 import {IKernel} from "enten-v1/interfaces/IKernel.sol";
 import {IController} from "enten-v1/interfaces/IController.sol";
 import {AccessControl} from "openzeppelin/contracts/access/AccessControl.sol";
-import {TimelockController} from "openzeppelin/contracts/governance/TimelockController.sol";
 import {Slots} from "enten-v1/libraries/Slots.sol";
 
 contract Gateway is Policy, AccessControl {
