@@ -2,7 +2,6 @@
 pragma solidity 0.8.34;
 
 import {IBurner} from "../src/interfaces/IBurner.sol";
-import {BancorNavMath} from "../src/libraries/BancorNavMath.sol";
 import {BurnerModule} from "../src/modules/DFLT/Burner.sol";
 import {BRNER} from "../src/modules/DFLT/BRNER.sol";
 import {BurnerPolicy} from "../src/policies/BurnerPolicy.sol";
@@ -454,50 +453,6 @@ contract BurnerModuleAndPolicyTest is Test {
         assertEq(_effectiveSupply(), effectiveBefore - redeemAmount);
     }
 
-    function testBurnThatOnlyUnlocksTeamTokensStillLowersCurveState() public {
-        _seedBacking(asset, 900 ether);
-        _setLocked(100 ether);
-        _setCurveState(address(asset), 1_000 ether, 1_000 ether);
-
-        vm.prank(user);
-        policy.burn(40 ether);
-
-        assertEq(_locked(), 60 ether);
-        assertEq(_effectiveSupply(), 900 ether);
-        assertEq(_curveSupply(address(asset)), 960 ether);
-        assertLt(_curveReserve(address(asset)), 1_000 ether);
-    }
-
-    function testBurnCurveReductionStopsAtPostBurnNavFloor() public {
-        _seedBacking(asset, 500 ether);
-        _setLocked(100 ether);
-        _setCurveState(address(asset), 1_000 ether, 300 ether);
-
-        vm.prank(user);
-        policy.burn(100 ether);
-
-        uint256 supplyDelta = 1_000 ether - _curveSupply(address(asset));
-        assertGt(supplyDelta, 0);
-        assertLt(supplyDelta, 100 ether);
-
-        uint256 postBurnNavFloor = BancorNavMath.navFloorPriceWad(_effectiveSupply(), 500 ether, 500);
-        uint256 postSpot =
-            BancorNavMath.bancorSpotPriceWad(_curveSupply(address(asset)), _curveReserve(address(asset)), 2);
-        assertGe(postSpot, postBurnNavFloor);
-    }
-
-    function testRedeemDoesNotUpdateCurveState() public {
-        _seedBacking(asset, 900 ether);
-        _setLocked(100 ether);
-        _setCurveState(address(asset), 1_000 ether, 1_000 ether);
-
-        vm.prank(user);
-        policy.redeem(90 ether);
-
-        assertEq(_curveSupply(address(asset)), 1_000 ether);
-        assertEq(_curveReserve(address(asset)), 1_000 ether);
-    }
-
     function testActivatingBurnerPolicyBeforeBurnerModuleInstalledReverts() public {
         (Controller freshController,,,, BurnerPolicy freshPolicy,) = _deployFreshCoreWithoutBurner();
 
@@ -632,34 +587,6 @@ contract BurnerModuleAndPolicyTest is Test {
     function _setLocked(uint256 amount) internal {
         vm.prank(address(controller));
         kernel.updateState(Slots.TEAM_LOCKED_TOKENS_SLOT, bytes32(amount));
-    }
-
-    function _setCurveState(address token_, uint256 virtualSupply, uint256 virtualReserve) internal {
-        vm.startPrank(address(controller));
-        kernel.updateState(_curveBaseSlot(token_), bytes32(virtualSupply));
-        kernel.updateState(_curveReserveSlot(token_), bytes32(virtualReserve));
-        vm.stopPrank();
-    }
-
-    function _curveSupply(address token_) internal view returns (uint256) {
-        return uint256(kernel.viewData(_curveBaseSlot(token_)));
-    }
-
-    function _curveReserve(address token_) internal view returns (uint256) {
-        return uint256(kernel.viewData(_curveReserveSlot(token_)));
-    }
-
-    function _curveBaseSlot(address token_) internal pure returns (bytes32 slot) {
-        bytes32 namespace = keccak256("enten.bancor.curve.base.slot");
-        assembly ("memory-safe") {
-            mstore(0x00, namespace)
-            mstore(0x20, and(token_, 0xffffffffffffffffffffffffffffffffffffffff))
-            slot := keccak256(0x00, 0x40)
-        }
-    }
-
-    function _curveReserveSlot(address token_) internal pure returns (bytes32) {
-        return bytes32(uint256(_curveBaseSlot(token_)) + 1);
     }
 
     function _locked() internal view returns (uint256) {

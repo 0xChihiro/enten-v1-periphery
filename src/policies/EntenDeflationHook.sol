@@ -35,7 +35,6 @@ contract EntenDeflationHook is IHooks, IUnlockCallback, Policy {
     error Hook__ZeroAddress();
     error Hook__TokenControllerMismatch();
     error Hook__PoolMustIncludeEnten();
-    error Hook__ExactOutputUnsupported();
     error Hook__AmountTooLarge();
     error Hook__DeflationBurnerNotConfigured();
     error Hook__Unsupported();
@@ -105,9 +104,19 @@ contract EntenDeflationHook is IHooks, IUnlockCallback, Policy {
         returns (bytes4, BeforeSwapDelta, uint24)
     {
         _validateEntenPool(key);
-        if (params.amountSpecified > 0) revert Hook__ExactOutputUnsupported();
+        if (!_burningEnabled()) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
 
         Currency input = params.zeroForOne ? key.currency0 : key.currency1;
+        Currency output = params.zeroForOne ? key.currency1 : key.currency0;
+        if (params.amountSpecified > 0) {
+            if (!_isEnten(output)) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+
+            uint256 exactOutputBurnAmount = _grossUpFeeAmount(uint256(params.amountSpecified));
+            if (exactOutputBurnAmount == 0) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+
+            return (IHooks.beforeSwap.selector, toBeforeSwapDelta(_toInt128(exactOutputBurnAmount), 0), 0);
+        }
+
         if (!_isEnten(input)) {
             return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
@@ -130,17 +139,31 @@ contract EntenDeflationHook is IHooks, IUnlockCallback, Policy {
         returns (bytes4, int128)
     {
         _validateEntenPool(key);
-        if (params.amountSpecified > 0) revert Hook__ExactOutputUnsupported();
+        if (!_burningEnabled()) return (IHooks.afterSwap.selector, 0);
 
+        Currency input = params.zeroForOne ? key.currency0 : key.currency1;
         Currency output = params.zeroForOne ? key.currency1 : key.currency0;
-        if (!_isEnten(output)) return (IHooks.afterSwap.selector, 0);
+        uint256 burnAmount;
 
-        uint256 burnAmount = _feeAmount(_absInt128(params.zeroForOne ? delta.amount1() : delta.amount0()));
+        if (params.amountSpecified > 0) {
+            if (_isEnten(output)) {
+                burnAmount = _grossUpFeeAmount(uint256(params.amountSpecified));
+                if (burnAmount == 0) return (IHooks.afterSwap.selector, 0);
+
+                _takeAndBurnEnten(burnAmount);
+                return (IHooks.afterSwap.selector, 0);
+            }
+
+            if (!_isEnten(input)) return (IHooks.afterSwap.selector, 0);
+            burnAmount = _grossUpFeeAmount(_absInt128(params.zeroForOne ? delta.amount0() : delta.amount1()));
+        } else {
+            if (!_isEnten(output)) return (IHooks.afterSwap.selector, 0);
+            burnAmount = _feeAmount(_absInt128(params.zeroForOne ? delta.amount1() : delta.amount0()));
+        }
         if (burnAmount == 0) return (IHooks.afterSwap.selector, 0);
 
         int128 burnDelta = _toInt128(burnAmount);
-        POOL_MANAGER.take(ENTEN, address(this), burnAmount);
-        _burnEnten(burnAmount);
+        _takeAndBurnEnten(burnAmount);
 
         return (IHooks.afterSwap.selector, burnDelta);
     }
@@ -148,6 +171,7 @@ contract EntenDeflationHook is IHooks, IUnlockCallback, Policy {
     function burnAccrued() external returns (uint256 amount) {
         amount = accruedSellBurns;
         if (amount == 0) return 0;
+        if (!_burningEnabled()) return 0;
 
         accruedSellBurns = 0;
         POOL_MANAGER.unlock(abi.encode(amount));
@@ -176,6 +200,22 @@ contract EntenDeflationHook is IHooks, IUnlockCallback, Policy {
         return amount * BURN_BPS / BPS;
     }
 
+    function _grossUpFeeAmount(uint256 netAmount) internal pure returns (uint256) {
+        if (netAmount == 0) return 0;
+
+        uint256 grossAmount = (netAmount * BPS + (BPS - BURN_BPS) - 1) / (BPS - BURN_BPS);
+        if (_feeAmount(grossAmount) == 0) return 0;
+
+        while (grossAmount > netAmount) {
+            uint256 previousGross = grossAmount - 1;
+            uint256 previousFee = _feeAmount(previousGross);
+            if (previousFee == 0 || previousGross - previousFee < netAmount) break;
+            grossAmount = previousGross;
+        }
+
+        return grossAmount - netAmount;
+    }
+
     function _entenId() internal view returns (uint256) {
         return uint160(Currency.unwrap(ENTEN));
     }
@@ -189,6 +229,18 @@ contract EntenDeflationHook is IHooks, IUnlockCallback, Policy {
         if (amount == type(int128).min) revert Hook__AmountTooLarge();
         if (amount < 0) amount = -amount;
         return uint256(amount.toUint128());
+    }
+
+    function _burningEnabled() internal view returns (bool) {
+        Keycode burnerKeycode = toKeycode("BRNER");
+        return deflationBurner != address(0) && CONTROLLER.isPolicyActive(address(this))
+            && CONTROLLER.modulePermissions(burnerKeycode, address(this), IBurner.executeDeflationaryAction.selector)
+            && !CONTROLLER.moduleDisabled(burnerKeycode) && !CONTROLLER.settlementsPaused();
+    }
+
+    function _takeAndBurnEnten(uint256 amount) internal {
+        POOL_MANAGER.take(ENTEN, address(this), amount);
+        _burnEnten(amount);
     }
 
     function _burnEnten(uint256 amount) internal {
