@@ -161,6 +161,56 @@ contract AuctionTest is Test {
         assertEq(_bucketValue(IVault.Bucket.Team, address(asset)), teamAmount);
     }
 
+    function testGetPriceUsesPreviousRoundAverageWhenAboveNav() public {
+        IController.Receipt[] memory maxPayments = _maxPayments(LOT_SIZE);
+        uint256 previousRoundPayment = maxPayments[0].amount;
+        _fundAndApproveBuyer(previousRoundPayment);
+
+        uint256 epoch = auction.epochId();
+        vm.prank(buyer);
+        auction.buy(epoch, block.timestamp, LOT_SIZE, maxPayments);
+
+        assertEq(auction.previousRoundSold(), LOT_SIZE);
+        assertEq(auction.previousRoundRevenue(address(asset)), previousRoundPayment);
+        assertEq(auction.sold(), 0);
+        assertEq(auction.revenue(address(asset)), 0);
+
+        uint256 previousAveragePrice = _mulDivUp(previousRoundPayment, WAD, LOT_SIZE);
+
+        IController.Backing[] memory price = auction.getPrice();
+        assertEq(price.length, 1);
+        assertEq(price[0].asset, address(asset));
+        assertEq(price[0].backingPerToken, _mulDivUp(previousAveragePrice, PRICE_MULTIPLIER, WAD));
+
+        vm.warp(auction.startTime() + EPOCH_PERIOD / 4);
+
+        price = auction.getPrice();
+        assertEq(price[0].backingPerToken, _mulDivUp(previousAveragePrice, 1.5 ether, WAD));
+    }
+
+    function testGetPriceKeepsNavFloorWhenCurrentNavExceedsPreviousAverage() public {
+        IController.Receipt[] memory maxPayments = _maxPayments(LOT_SIZE);
+        uint256 previousRoundPayment = maxPayments[0].amount;
+        _fundAndApproveBuyer(previousRoundPayment);
+
+        uint256 epoch = auction.epochId();
+        vm.prank(buyer);
+        auction.buy(epoch, block.timestamp, LOT_SIZE, maxPayments);
+
+        uint256 targetNav = 3 ether;
+        uint256 targetBacking = token.totalSupply() * targetNav / WAD;
+        uint256 currentVaultBalance = asset.balanceOf(address(vault));
+        if (targetBacking > currentVaultBalance) {
+            asset.mint(address(vault), targetBacking - currentVaultBalance);
+        }
+        _setBucket(IVault.Bucket.Redeem, address(asset), targetBacking);
+
+        IController.Backing[] memory price = auction.getPrice();
+        assertEq(price.length, 1);
+        assertEq(price[0].asset, address(asset));
+        assertEq(price[0].backingPerToken, _grossedPrice(targetNav * PRICE_MULTIPLIER / WAD));
+    }
+
     function testBuyMintsTokensPullsPaymentAndUpdatesAccounting() public {
         uint256 mintAmount = 10 ether;
         IController.Receipt[] memory maxPayments = _maxPayments(mintAmount);

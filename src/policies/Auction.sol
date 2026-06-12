@@ -4,7 +4,7 @@ pragma solidity 0.8.34;
 import {ReentrancyGuard} from "openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Policy} from "enten-v1/Policy.sol";
 import {Permissions, Keycode} from "enten-v1/Utils.sol";
-import {backingPerToken} from "../Utils.sol";
+import {backingPerToken, assets} from "../Utils.sol";
 import {IKernel} from "enten-v1/interfaces/IKernel.sol";
 import {IController} from "enten-v1/interfaces/IController.sol";
 import {IToken} from "enten-v1/interfaces/IToken.sol";
@@ -31,6 +31,10 @@ interface IControllerFeeView {
  * @dev Forked and modified from Euler Fee Flow, then further modified from heesho's version.
  */
 contract Auction is ReentrancyGuard, Policy {
+    struct Revenue {
+        address asset;
+        uint256 revenue;
+    }
     /*----------  CONSTANTS  --------------------------------------------*/
 
     Keycode internal constant AUCTION_KEYCODE = Keycode.wrap("AUCTN");
@@ -56,6 +60,10 @@ contract Auction is ReentrancyGuard, Policy {
     uint256 public startTime; // timestamp when current epoch began
     MINTR public minter; // Associated Minter Module that goes with the Auction
     uint256 public remainingLot; // Remaining lot size of the current auction
+    uint256 public previousRoundSold; // Amount of tokens sold in the previous round
+    mapping(address => uint256) public previousRoundRevenue; // Amount of each asset brought in in the previous round.
+    uint256 public sold; // Amount of tokens that have been sold during the current round
+    mapping(address => uint256) public revenue; // Amount of tokens brought in for this round
 
     /*----------  ERRORS  -----------------------------------------------*/
 
@@ -129,7 +137,7 @@ contract Auction is ReentrancyGuard, Policy {
     /*----------  EXTERNAL FUNCTIONS  -----------------------------------*/
 
     function buy(uint256 _epochId, uint256 deadline, uint256 mintAmount, IController.Receipt[] calldata maxPayments)
-        external
+        public
         nonReentrant
         returns (IController.Receipt[] memory)
     {
@@ -162,6 +170,13 @@ contract Auction is ReentrancyGuard, Policy {
         IController.StateUpdate[] memory updates = new IController.StateUpdate[](0);
         remainingLot -= mintAmount;
         minter.mint(msg.sender, mintAmount, receipts, updates);
+        sold += mintAmount;
+        for (uint256 i = 0; i < receipts.length;) {
+            revenue[receipts[i].asset] += receipts[i].amount;
+            unchecked {
+                i++;
+            }
+        }
 
         emit Auction__Buy(msg.sender, currentEpoch, receipts, mintAmount);
 
@@ -172,12 +187,30 @@ contract Auction is ReentrancyGuard, Policy {
         return receipts;
     }
 
+    function buyMax(uint256 _epochId, uint256 deadline, IController.Receipt[] calldata maxPayments)
+        external
+        nonReentrant
+        returns (IController.Receipt[] memory)
+    {
+        return buy(_epochId, deadline, remainingLot, maxPayments);
+    }
+
     function startNextAuction() external nonReentrant {
         if (block.timestamp < startTime + epochPeriod) revert Auction__OngoingAuction();
         _startNextAuction();
     }
 
     function _startNextAuction() internal {
+        previousRoundSold = sold;
+        delete sold;
+        address[] memory _assets = auctionAssets();
+        for (uint256 i = 0; i < _assets.length;) {
+            previousRoundRevenue[_assets[i]] = revenue[_assets[i]];
+            delete revenue[_assets[i]];
+            unchecked {
+                i++;
+            }
+        }
         remainingLot = TOKEN.totalSupply() + LOT_SIZE > ITokenSupply(address(TOKEN)).MAX_SUPPLY()
             ? ITokenSupply(address(TOKEN)).MAX_SUPPLY() - TOKEN.totalSupply()
             : LOT_SIZE;
@@ -205,24 +238,56 @@ contract Auction is ReentrancyGuard, Policy {
         }
         uint256 scalar = expectedScalar > MIN_PRICE_MULTIPLIER ? expectedScalar : MIN_PRICE_MULTIPLIER;
         uint256 bps = IControllerFeeView(address(CONTROLLER)).BPS();
-        uint256 protocolFeeBps = IControllerFeeView(address(CONTROLLER)).AUCTION_FEE_BPS();
-        uint256 teamBps = uint256(KERNEL.viewData(Slots.TEAM_PERCENTAGE_SLOT));
-        uint256 treasuryBps = uint256(KERNEL.viewData(Slots.TREASURY_PERCENTAGE_SLOT));
-        if (bps == 0 || protocolFeeBps >= bps || teamBps >= bps || treasuryBps >= bps || teamBps + treasuryBps >= bps) {
-            revert Auction__InvalidFeeConfiguration();
+        uint256 backingBps;
+        uint256 postProtocolBps;
+        {
+            uint256 protocolFeeBps = IControllerFeeView(address(CONTROLLER)).AUCTION_FEE_BPS();
+            uint256 teamBps = uint256(KERNEL.viewData(Slots.TEAM_PERCENTAGE_SLOT));
+            uint256 treasuryBps = uint256(KERNEL.viewData(Slots.TREASURY_PERCENTAGE_SLOT));
+            if (
+                bps == 0 || protocolFeeBps >= bps || teamBps >= bps || treasuryBps >= bps
+                    || teamBps + treasuryBps >= bps
+            ) {
+                revert Auction__InvalidFeeConfiguration();
+            }
+            backingBps = bps - teamBps - treasuryBps;
+            postProtocolBps = bps - protocolFeeBps;
         }
-        uint256 backingBps = bps - teamBps - treasuryBps;
-        uint256 postProtocolBps = bps - protocolFeeBps;
 
         backings = backingPerToken(KERNEL, TOKEN);
+
         for (uint256 i = 0; i < backings.length;) {
-            uint256 scaledBacking = backings[i].backingPerToken * scalar / PRICE_MULTIPLIER_SCALE;
-            if (scaledBacking == 0) revert Auction__UnseededAsset();
-            uint256 requiredPostProtocol = Math.mulDiv(scaledBacking, bps, backingBps, Math.Rounding.Ceil);
-            backings[i].backingPerToken = Math.mulDiv(requiredPostProtocol, bps, postProtocolBps, Math.Rounding.Ceil);
+            uint256 price;
+            {
+                uint256 scaledBacking = Math.mulDiv(backings[i].backingPerToken, scalar, PRICE_MULTIPLIER_SCALE);
+                if (scaledBacking == 0) revert Auction__UnseededAsset();
+
+                uint256 requiredPostProtocol = Math.mulDiv(scaledBacking, bps, backingBps, Math.Rounding.Ceil);
+                price = Math.mulDiv(requiredPostProtocol, bps, postProtocolBps, Math.Rounding.Ceil);
+            }
+
+            if (previousRoundSold > 0) {
+                uint256 previousAveragePrice = Math.mulDiv(
+                    previousRoundRevenue[backings[i].asset],
+                    PRICE_MULTIPLIER_SCALE,
+                    previousRoundSold,
+                    Math.Rounding.Ceil
+                );
+                uint256 averagePrice =
+                    Math.mulDiv(previousAveragePrice, scalar, PRICE_MULTIPLIER_SCALE, Math.Rounding.Ceil);
+                price = averagePrice > price ? averagePrice : price;
+            }
+
+            backings[i].backingPerToken = price;
+
             unchecked {
                 i++;
             }
         }
+    }
+
+    function auctionAssets() public view returns (address[] memory) {
+        address[] memory _assets = assets(KERNEL);
+        return _assets;
     }
 }
