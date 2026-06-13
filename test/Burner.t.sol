@@ -83,7 +83,7 @@ contract BurnerModuleAndPolicyTest is Test {
         kernel = new Kernel(predictedController, predictedVault);
         vault = new Vault(predictedController, predictedKernel);
         token = new Token("Enten", "ENTEN", predictedController, user, INITIAL_SUPPLY, type(uint256).max);
-        controller = new Controller(admin, protocolCollector, predictedKernel, predictedVault, predictedToken);
+        controller = new Controller(admin, protocolCollector, predictedKernel, predictedVault, predictedToken, 0);
 
         asset = new ERC20Mock();
         secondAsset = new ERC20Mock();
@@ -643,7 +643,7 @@ contract BurnerModuleAndPolicyTest is Test {
         freshKernel = new Kernel(predictedController, predictedVault);
         freshVault = new Vault(predictedController, predictedKernel);
         freshToken = new Token("Enten", "ENTEN", predictedController, user, INITIAL_SUPPLY, type(uint256).max);
-        freshController = new Controller(admin, protocolCollector, predictedKernel, predictedVault, predictedToken);
+        freshController = new Controller(admin, protocolCollector, predictedKernel, predictedVault, predictedToken, 0);
         freshPolicy = new BurnerPolicy(address(freshController));
         freshAsset = new ERC20Mock();
     }

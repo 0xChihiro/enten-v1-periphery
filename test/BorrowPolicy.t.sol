@@ -45,7 +45,7 @@ contract BorrowPolicyTest is Test {
         kernel = new Kernel(predictedController, predictedVault);
         vault = new Vault(predictedController, predictedKernel);
         token = new Token("Enten", "ENTEN", predictedController, user, INITIAL_SUPPLY, type(uint256).max);
-        controller = new Controller(admin, protocolCollector, predictedKernel, predictedVault, predictedToken);
+        controller = new Controller(admin, protocolCollector, predictedKernel, predictedVault, predictedToken, 0);
 
         borrower = new Borrower(address(controller), address(kernel));
         policy = new BorrowPolicy(address(controller));

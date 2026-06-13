@@ -80,7 +80,8 @@ contract TreasuryHandlerTest is Test {
         kernel = new Kernel(predictedController, predictedVault);
         vault = new Vault(predictedController, predictedKernel);
         token = new Token("Enten", "ENTEN", predictedController, tokenRecipient, INITIAL_SUPPLY, type(uint256).max);
-        controller = new Controller(controllerAdmin, protocolCollector, predictedKernel, predictedVault, predictedToken);
+        controller =
+            new Controller(controllerAdmin, protocolCollector, predictedKernel, predictedVault, predictedToken, 0);
 
         treasuryModule = new Treasury(address(controller));
         handler = new TreasuryHandler(address(controller), treasuryAdmin);

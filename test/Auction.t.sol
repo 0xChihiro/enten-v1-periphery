@@ -55,7 +55,7 @@ contract AuctionTest is Test {
         kernel = new Kernel(predictedController, predictedVault);
         vault = new Vault(predictedController, predictedKernel);
         token = new Token("Enten", "ENTEN", predictedController, holder, INITIAL_SUPPLY, type(uint256).max);
-        controller = new Controller(admin, protocolCollector, predictedKernel, predictedVault, predictedToken);
+        controller = new Controller(admin, protocolCollector, predictedKernel, predictedVault, predictedToken, 0);
 
         asset = new ERC20Mock();
         minter = new Minter(address(controller));

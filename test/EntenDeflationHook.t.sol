@@ -752,7 +752,7 @@ contract EntenDeflationHookTest is Test {
         kernel = new Kernel(predictedController, predictedVault);
         vault = new Vault(predictedController, predictedKernel);
         enten = new Token("Enten", "ENTEN", predictedController, address(this), INITIAL_SUPPLY, type(uint256).max);
-        controller = new Controller(admin, protocolCollector, predictedKernel, predictedVault, predictedToken);
+        controller = new Controller(admin, protocolCollector, predictedKernel, predictedVault, predictedToken, 0);
     }
 
     function _swap(bool zeroForOne, uint256 amountIn) internal returns (BalanceDelta) {
