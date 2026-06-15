@@ -29,7 +29,7 @@ contract PresaleAuction is ReentrancyGuard, Policy {
     address public immutable ASSET;
     uint256 public immutable PRESALE_SIZE;
     uint256 public immutable START_PRICE;
-    uint256 public immutable PRICE_MULTIPLIER;
+    uint256 public immutable VIRTUAL_TOKEN_RESERVE;
     uint256 public immutable DURATION;
     uint256 public immutable MIN_BID;
 
@@ -39,9 +39,10 @@ contract PresaleAuction is ReentrancyGuard, Policy {
     uint256 public startTime;
     uint256 public remaining;
     uint256 public sold;
-    uint256 public currentPrice;
+    uint256 public currentPremium;
     uint256 public lastPriceUpdate;
     uint256 public totalCommitted;
+    bool public premiumInitialized;
 
     /*----------  ERRORS  -----------------------------------------------*/
 
@@ -73,12 +74,12 @@ contract PresaleAuction is ReentrancyGuard, Policy {
         address asset,
         uint256 presaleSize,
         uint256 startPrice,
-        uint256 priceMultiplier,
+        uint256 virtualTokenReserve,
         uint256 duration,
         uint256 minBid
     ) Policy(controller) {
         if (
-            asset == address(0) || presaleSize == 0 || startPrice == 0 || priceMultiplier <= WAD || minBid == 0
+            asset == address(0) || presaleSize == 0 || startPrice == 0 || virtualTokenReserve == 0 || minBid == 0
                 || minBid > presaleSize || duration < MIN_DURATION || duration > MAX_DURATION
         ) {
             revert PresaleAuction__InvalidConfig();
@@ -89,14 +90,13 @@ contract PresaleAuction is ReentrancyGuard, Policy {
         ASSET = asset;
         PRESALE_SIZE = presaleSize;
         START_PRICE = startPrice;
-        PRICE_MULTIPLIER = priceMultiplier;
+        VIRTUAL_TOKEN_RESERVE = virtualTokenReserve;
         DURATION = duration;
         MIN_BID = minBid;
 
         startTime = block.timestamp;
         lastPriceUpdate = block.timestamp;
         remaining = presaleSize;
-        currentPrice = startPrice;
     }
 
     function KEYCODE() public pure override returns (Keycode) {
@@ -137,14 +137,20 @@ contract PresaleAuction is ReentrancyGuard, Policy {
 
     function price() public view returns (uint256) {
         uint256 minimum = minimumPrice();
-        uint256 anchor = currentPrice;
-        if (anchor <= minimum) return minimum;
+        return minimum + _premium(minimum);
+    }
 
-        uint256 elapsed = block.timestamp - lastPriceUpdate;
-        if (elapsed >= DURATION) return minimum;
+    function quote(uint256 amount) public view returns (uint256 payment, uint256 spotPrice, uint256 nextPremium) {
+        if (amount == 0) revert PresaleAuction__InvalidMintAmount();
+        if (amount > remaining) revert PresaleAuction__TooManyTokens();
 
-        uint256 decay = Math.mulDiv(anchor - minimum, elapsed, DURATION);
-        return anchor - decay;
+        uint256 minimum = minimumPrice();
+        uint256 premium = _premium(minimum);
+        (uint256 premiumPayment, uint256 premiumAfter) = _premiumQuote(amount, premium);
+
+        payment = Math.mulDiv(amount, minimum, WAD, Math.Rounding.Ceil) + premiumPayment;
+        spotPrice = minimum + premium;
+        nextPremium = premiumAfter;
     }
 
     function minimumPrice() public view returns (uint256) {
@@ -169,8 +175,7 @@ contract PresaleAuction is ReentrancyGuard, Policy {
         if (amount > remaining) revert PresaleAuction__TooManyTokens();
         if (amount < MIN_BID && amount != remaining) revert PresaleAuction__MinimumBid();
 
-        uint256 clearingPrice = price();
-        uint256 paymentAmount = Math.mulDiv(amount, clearingPrice, WAD, Math.Rounding.Ceil);
+        (uint256 paymentAmount, uint256 clearingPrice, uint256 nextPremium) = quote(amount);
         if (paymentAmount > maxPayment) revert PresaleAuction__MaxPayment();
 
         costs = new IController.Receipt[](1);
@@ -180,14 +185,35 @@ contract PresaleAuction is ReentrancyGuard, Policy {
             remaining -= amount;
             sold += amount;
         }
-        uint256 nextPrice = Math.mulDiv(clearingPrice, PRICE_MULTIPLIER, WAD, Math.Rounding.Ceil);
-        currentPrice = nextPrice;
+        currentPremium = nextPremium;
         lastPriceUpdate = block.timestamp;
+        premiumInitialized = true;
         totalCommitted += paymentAmount;
 
         minterModule.mint(msg.sender, amount, costs, new IController.StateUpdate[](0));
 
-        emit PresaleAuction__Buy(msg.sender, costs[0], amount, clearingPrice, nextPrice);
+        emit PresaleAuction__Buy(msg.sender, costs[0], amount, clearingPrice, price());
+    }
+
+    function _premium(uint256 minimum) internal view returns (uint256) {
+        uint256 anchor = premiumInitialized ? currentPremium : START_PRICE > minimum ? START_PRICE - minimum : 0;
+        uint256 elapsed = block.timestamp - lastPriceUpdate;
+        return elapsed >= DURATION ? 0 : anchor - Math.mulDiv(anchor, elapsed, DURATION);
+    }
+
+    function _premiumQuote(uint256 amount, uint256 premium)
+        internal
+        view
+        returns (uint256 premiumPayment, uint256 nextPremium)
+    {
+        if (premium == 0) return (0, 0);
+
+        uint256 tokenReserve = VIRTUAL_TOKEN_RESERVE + remaining;
+        uint256 nextTokenReserve = tokenReserve - amount;
+        uint256 quoteReserve = Math.mulDiv(premium, tokenReserve, WAD, Math.Rounding.Ceil);
+
+        premiumPayment = Math.mulDiv(quoteReserve, amount, nextTokenReserve, Math.Rounding.Ceil);
+        nextPremium = Math.mulDiv(quoteReserve + premiumPayment, WAD, nextTokenReserve, Math.Rounding.Ceil);
     }
 
     function _grossUpForFees(uint256 targetBackingPerToken) internal view returns (uint256) {

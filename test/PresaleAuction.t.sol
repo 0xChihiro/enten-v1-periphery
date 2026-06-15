@@ -19,7 +19,7 @@ contract PresaleAuctionTest is Test {
     uint256 internal constant INITIAL_BACKING = 1_000 ether;
     uint256 internal constant PRESALE_SIZE = 100 ether;
     uint256 internal constant START_PRICE = 2 ether;
-    uint256 internal constant PRICE_MULTIPLIER = 1.05 ether;
+    uint256 internal constant VIRTUAL_TOKEN_RESERVE = 200 ether;
     uint256 internal constant DURATION = 10 hours;
     uint256 internal constant MIN_BID = 10 ether;
     uint256 internal constant WAD = 1e18;
@@ -55,7 +55,7 @@ contract PresaleAuctionTest is Test {
 
         asset = new ERC20Mock();
         minter = new Minter(address(controller));
-        presale = _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, PRICE_MULTIPLIER, DURATION, MIN_BID);
+        presale = _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, VIRTUAL_TOKEN_RESERVE, DURATION, MIN_BID);
 
         _setAssets(address(asset));
         _seedBacking(asset, INITIAL_BACKING);
@@ -73,42 +73,40 @@ contract PresaleAuctionTest is Test {
         assertEq(presale.ASSET(), address(asset));
         assertEq(presale.PRESALE_SIZE(), PRESALE_SIZE);
         assertEq(presale.START_PRICE(), START_PRICE);
-        assertEq(presale.PRICE_MULTIPLIER(), PRICE_MULTIPLIER);
+        assertEq(presale.VIRTUAL_TOKEN_RESERVE(), VIRTUAL_TOKEN_RESERVE);
         assertEq(presale.DURATION(), DURATION);
         assertEq(presale.MIN_BID(), MIN_BID);
         assertEq(presale.remaining(), PRESALE_SIZE);
-        assertEq(presale.currentPrice(), START_PRICE);
+        assertEq(presale.currentPremium(), 0);
+        assertFalse(presale.premiumInitialized());
         assertEq(presale.startTime(), 1_000);
         assertEq(presale.lastPriceUpdate(), 1_000);
     }
 
     function testConstructorRejectsInvalidParameters() public {
         vm.expectRevert(PresaleAuction.PresaleAuction__InvalidConfig.selector);
-        _deployPresale(address(0), PRESALE_SIZE, START_PRICE, PRICE_MULTIPLIER, DURATION, MIN_BID);
+        _deployPresale(address(0), PRESALE_SIZE, START_PRICE, VIRTUAL_TOKEN_RESERVE, DURATION, MIN_BID);
 
         vm.expectRevert(PresaleAuction.PresaleAuction__InvalidConfig.selector);
-        _deployPresale(address(asset), 0, START_PRICE, PRICE_MULTIPLIER, DURATION, MIN_BID);
+        _deployPresale(address(asset), 0, START_PRICE, VIRTUAL_TOKEN_RESERVE, DURATION, MIN_BID);
 
         vm.expectRevert(PresaleAuction.PresaleAuction__InvalidConfig.selector);
-        _deployPresale(address(asset), PRESALE_SIZE, 0, PRICE_MULTIPLIER, DURATION, MIN_BID);
+        _deployPresale(address(asset), PRESALE_SIZE, 0, VIRTUAL_TOKEN_RESERVE, DURATION, MIN_BID);
 
         vm.expectRevert(PresaleAuction.PresaleAuction__InvalidConfig.selector);
         _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, 0, DURATION, MIN_BID);
 
         vm.expectRevert(PresaleAuction.PresaleAuction__InvalidConfig.selector);
-        _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, WAD, DURATION, MIN_BID);
+        _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, VIRTUAL_TOKEN_RESERVE, DURATION, 0);
 
         vm.expectRevert(PresaleAuction.PresaleAuction__InvalidConfig.selector);
-        _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, PRICE_MULTIPLIER, DURATION, 0);
+        _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, VIRTUAL_TOKEN_RESERVE, DURATION, PRESALE_SIZE + 1);
 
         vm.expectRevert(PresaleAuction.PresaleAuction__InvalidConfig.selector);
-        _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, PRICE_MULTIPLIER, DURATION, PRESALE_SIZE + 1);
+        _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, VIRTUAL_TOKEN_RESERVE, 1 hours - 1, MIN_BID);
 
         vm.expectRevert(PresaleAuction.PresaleAuction__InvalidConfig.selector);
-        _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, PRICE_MULTIPLIER, 1 hours - 1, MIN_BID);
-
-        vm.expectRevert(PresaleAuction.PresaleAuction__InvalidConfig.selector);
-        _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, PRICE_MULTIPLIER, 7 days + 1, MIN_BID);
+        _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, VIRTUAL_TOKEN_RESERVE, 7 days + 1, MIN_BID);
     }
 
     function testPolicyConfiguresMinterDependencyAndPermission() public view {
@@ -139,11 +137,9 @@ contract PresaleAuctionTest is Test {
         assertEq(presale.price(), floor);
     }
 
-    function testBuyMintsAndMultipliesPriceAnchor() public {
+    function testBuyMintsAndMovesPremiumAlongCurve() public {
         uint256 mintAmount = MIN_BID;
-        uint256 clearingPrice = presale.price();
-        uint256 nextPrice = _mulDivUp(clearingPrice, PRICE_MULTIPLIER, WAD);
-        uint256 paymentAmount = _quotePayment(mintAmount);
+        (uint256 paymentAmount,, uint256 nextPremium) = presale.quote(mintAmount);
         uint256 protocolFee = _protocolFee(paymentAmount);
         uint256 netPayment = paymentAmount - protocolFee;
 
@@ -159,9 +155,10 @@ contract PresaleAuctionTest is Test {
         assertEq(token.totalSupply(), INITIAL_SUPPLY + mintAmount);
         assertEq(presale.remaining(), PRESALE_SIZE - mintAmount);
         assertEq(presale.sold(), mintAmount);
-        assertEq(presale.currentPrice(), nextPrice);
+        assertEq(presale.currentPremium(), nextPremium);
+        assertTrue(presale.premiumInitialized());
         assertEq(presale.lastPriceUpdate(), block.timestamp);
-        assertEq(presale.price(), nextPrice);
+        assertEq(presale.price(), presale.minimumPrice() + nextPremium);
 
         assertEq(asset.balanceOf(buyer), 0);
         assertEq(asset.balanceOf(protocolCollector), protocolFee);
@@ -169,19 +166,25 @@ contract PresaleAuctionTest is Test {
         assertEq(_bucketValue(IVault.Bucket.Redeem, address(asset)), INITIAL_BACKING + netPayment);
     }
 
-    function testPriceDecaysFromMultipliedPriceAfterBuy() public {
+    function testPriceDecaysFromCurvePremiumAfterBuy() public {
         uint256 mintAmount = MIN_BID;
-        uint256 paymentAmount = _quotePayment(mintAmount);
+        (uint256 paymentAmount,, uint256 nextPremium) = presale.quote(mintAmount);
         _fundAndApproveBuyer(paymentAmount);
 
         vm.prank(buyer);
         presale.buy(mintAmount, paymentAmount, block.timestamp);
 
-        uint256 anchor = _mulDivUp(START_PRICE, PRICE_MULTIPLIER, WAD);
         uint256 floorAfterBuy = presale.minimumPrice();
 
         vm.warp(block.timestamp + DURATION / 2);
-        assertEq(presale.price(), anchor - (anchor - floorAfterBuy) / 2);
+        assertEq(presale.price(), floorAfterBuy + nextPremium - nextPremium / 2);
+    }
+
+    function testLargerBuysPayHigherAverageCurvePrice() public view {
+        (uint256 smallPayment,,) = presale.quote(MIN_BID);
+        (uint256 largePayment,,) = presale.quote(MIN_BID * 2);
+
+        assertGt(_mulDivUp(largePayment, WAD, MIN_BID * 2), _mulDivUp(smallPayment, WAD, MIN_BID));
     }
 
     function testBackingFloorAccountsForAllMintFees() public {
@@ -281,17 +284,18 @@ contract PresaleAuctionTest is Test {
         address asset_,
         uint256 presaleSize,
         uint256 startPrice,
-        uint256 priceMultiplier,
+        uint256 virtualTokenReserve,
         uint256 duration,
         uint256 minBid
     ) internal returns (PresaleAuction) {
         return new PresaleAuction(
-            address(controller), asset_, presaleSize, startPrice, priceMultiplier, duration, minBid
+            address(controller), asset_, presaleSize, startPrice, virtualTokenReserve, duration, minBid
         );
     }
 
     function _quotePayment(uint256 mintAmount) internal view returns (uint256) {
-        return _mulDivUp(mintAmount, presale.price(), WAD);
+        (uint256 payment,,) = presale.quote(mintAmount);
+        return payment;
     }
 
     function _fundAndApproveBuyer(uint256 amount) internal {
