@@ -27,6 +27,7 @@ contract PresaleAuction is ReentrancyGuard, Policy {
     IKernel public immutable KERNEL;
     IToken public immutable TOKEN;
     address public immutable ASSET;
+    address public immutable ADMIN;
     uint256 public immutable PRESALE_SIZE;
     uint256 public immutable START_PRICE;
     uint256 public immutable VIRTUAL_TOKEN_RESERVE;
@@ -56,6 +57,10 @@ contract PresaleAuction is ReentrancyGuard, Policy {
     error PresaleAuction__TooManyTokens();
     error PresaleAuction__UnsupportedBackingAsset();
     error PresaleAuction__UnseededAsset();
+    error PresaleAuction__NotAdmin();
+    error PresaleAuction__NotOpen();
+    error PresaleAuction__AlreadyOpen();
+    error PresaleAuction__StartPriceBelowFloor();
 
     /*----------  EVENTS  -----------------------------------------------*/
 
@@ -67,11 +72,21 @@ contract PresaleAuction is ReentrancyGuard, Policy {
         uint256 nextPrice
     );
 
+    event PresaleAuction__Open(uint256 startTime, uint256 startPrice, uint256 floor);
+
+    /*----------  MODIFIERS  --------------------------------------------*/
+
+    modifier onlyAdmin() {
+        if (msg.sender != ADMIN) revert PresaleAuction__NotAdmin();
+        _;
+    }
+
     /*----------  CONSTRUCTOR  ------------------------------------------*/
 
     constructor(
         address controller,
         address asset,
+        address admin,
         uint256 presaleSize,
         uint256 startPrice,
         uint256 virtualTokenReserve,
@@ -79,8 +94,9 @@ contract PresaleAuction is ReentrancyGuard, Policy {
         uint256 minBid
     ) Policy(controller) {
         if (
-            asset == address(0) || presaleSize == 0 || startPrice == 0 || virtualTokenReserve == 0 || minBid == 0
-                || minBid > presaleSize || duration < MIN_DURATION || duration > MAX_DURATION
+            asset == address(0) || admin == address(0) || presaleSize == 0 || startPrice == 0
+                || virtualTokenReserve == 0 || minBid == 0 || minBid > presaleSize || duration < MIN_DURATION
+                || duration > MAX_DURATION
         ) {
             revert PresaleAuction__InvalidConfig();
         }
@@ -88,14 +104,16 @@ contract PresaleAuction is ReentrancyGuard, Policy {
         KERNEL = CONTROLLER.KERNEL();
         TOKEN = CONTROLLER.TOKEN();
         ASSET = asset;
+        ADMIN = admin;
         PRESALE_SIZE = presaleSize;
         START_PRICE = startPrice;
         VIRTUAL_TOKEN_RESERVE = virtualTokenReserve;
         DURATION = duration;
         MIN_BID = minBid;
 
-        startTime = block.timestamp;
-        lastPriceUpdate = block.timestamp;
+        // The decay/duration clock is started by {open}, not at construction, so that latency between
+        // deploying, seeding backing, and going live does not silently consume the premium or the sale
+        // window. startTime == 0 is the "not yet opened" sentinel.
         remaining = presaleSize;
     }
 
@@ -116,6 +134,26 @@ contract PresaleAuction is ReentrancyGuard, Policy {
     }
 
     /*----------  EXTERNAL FUNCTIONS  -----------------------------------*/
+
+    /// @notice Start the presale: anchors the decay/duration clock to now and locks in that the configured
+    ///         opening price is meaningful against the live floor.
+    /// @dev    One-time, admin-only. Reverts `AlreadyOpen` if called twice. Reads `minimumPrice()`, which
+    ///         itself reverts unless backing is seeded against exactly the configured `ASSET`, so calling
+    ///         this proves the presale is fully provisioned. Requires `START_PRICE > minimumPrice()` (the
+    ///         fee-grossed floor) so the Dutch-auction premium is actually live at open rather than silently
+    ///         clamped to the floor. Deploy, seed backing, set fees, then `open()` immediately before going
+    ///         live — the sale window and premium both run from this call, not from deployment.
+    function open() external onlyAdmin {
+        if (startTime != 0) revert PresaleAuction__AlreadyOpen();
+
+        uint256 floor = minimumPrice();
+        if (START_PRICE <= floor) revert PresaleAuction__StartPriceBelowFloor();
+
+        startTime = block.timestamp;
+        lastPriceUpdate = block.timestamp;
+
+        emit PresaleAuction__Open(block.timestamp, START_PRICE, floor);
+    }
 
     function buy(uint256 amount, uint256 maxPayment, uint256 deadline)
         external
@@ -153,6 +191,12 @@ contract PresaleAuction is ReentrancyGuard, Policy {
         nextPremium = premiumAfter;
     }
 
+    /// @notice The fee-grossed backing-per-token floor the presale prices against.
+    /// @dev    The presale is intentionally single-asset: it requires exactly one registered backing asset,
+    ///         equal to {ASSET}. Registering a second backing asset (via `Gateway.addAsset`) while the presale
+    ///         is live makes `backings.length != 1`, so this and every `price`/`quote`/`buy` call will revert
+    ///         `PresaleAuction__UnsupportedBackingAsset` — i.e. it bricks the presale. This is accepted
+    ///         behavior; do not add a second backing asset until the presale has concluded.
     function minimumPrice() public view returns (uint256) {
         IController.Backing[] memory backings = backingPerToken(KERNEL, TOKEN);
         if (backings.length != 1 || backings[0].asset != ASSET) {
@@ -160,7 +204,12 @@ contract PresaleAuction is ReentrancyGuard, Policy {
         }
         if (backings[0].backingPerToken == 0) revert PresaleAuction__UnseededAsset();
 
-        return _grossUpForFees(backings[0].backingPerToken);
+        // backingPerToken floors `totalBacking * WAD / supply`, but the core's backing invariant requires the
+        // post-mint backing to cover a CEIL-preserved ratio (Dispatch._validateBacking). Add a 1-wei cushion so
+        // the grossed floor targets at least ceil(totalBacking * WAD / supply); this prevents a zero/low-premium
+        // quote from producing a payment that the settlement would reject on rounding. Cost is a sub-wei-per-token
+        // overcharge that only ever favors backing.
+        return _grossUpForFees(backings[0].backingPerToken + 1);
     }
 
     /*----------  INTERNAL FUNCTIONS  -----------------------------------*/
@@ -170,6 +219,7 @@ contract PresaleAuction is ReentrancyGuard, Policy {
         returns (IController.Receipt[] memory costs)
     {
         if (block.timestamp > deadline) revert PresaleAuction__DeadlinePassed();
+        if (startTime == 0) revert PresaleAuction__NotOpen();
         if (remaining == 0 || block.timestamp >= startTime + DURATION) revert PresaleAuction__AuctionOver();
         if (amount == 0) revert PresaleAuction__InvalidMintAmount();
         if (amount > remaining) revert PresaleAuction__TooManyTokens();
@@ -190,7 +240,7 @@ contract PresaleAuction is ReentrancyGuard, Policy {
         premiumInitialized = true;
         totalCommitted += paymentAmount;
 
-        minterModule.mint(msg.sender, amount, costs, new IController.StateUpdate[](0));
+        minterModule.mint(msg.sender, amount, costs);
 
         emit PresaleAuction__Buy(msg.sender, costs[0], amount, clearingPrice, price());
     }

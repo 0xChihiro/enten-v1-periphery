@@ -16,4 +16,6 @@ abstract contract Strategy {
     }
 
     function ASSETS() external view virtual returns (address[] memory assets);
+
+    function TVL() external view virtual returns (uint256[] memory tvl);
 }

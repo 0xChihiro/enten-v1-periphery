@@ -18,6 +18,7 @@ contract TreasuryHandler is Policy, AccessControl {
     error TreasuryHandler__StrategyHasNoAssets();
     error TreasuryHandler__StrategyAlreadyActive();
     error TreasuryHandler__StrategyNotActive();
+    error TreasuryHandler__FundsStillDeployed();
 
     event TreasuryHandler__AddStrategy();
     event TreasuryHandler__RemoveStrategy();
@@ -77,6 +78,13 @@ contract TreasuryHandler is Policy, AccessControl {
         if (strategyCounter == 0 || !strategyIsActive[Strategy(strategy)]) revert TreasuryHandler__StrategyNotActive();
         address[] storage assets = strategyAssets[strategy];
         strategyIsActive[Strategy(strategy)] = false;
+        uint256[] memory deployedAmounts = Strategy(strategy).TVL();
+        for (uint256 i = 0; i < deployedAmounts.length;) {
+            if (deployedAmounts[i] > 0) revert TreasuryHandler__FundsStillDeployed();
+            unchecked {
+                i++;
+            }
+        }
         for (uint256 i = 0; i < assets.length;) {
             assetAccess[strategy][assets[i]] = false;
             unchecked {

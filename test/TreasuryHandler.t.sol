@@ -19,6 +19,7 @@ import {Test} from "forge-std/Test.sol";
 
 contract MockStrategy is Strategy {
     address[] internal supportedAssets;
+    uint256[] internal tvl;
 
     constructor(address treasury, address[] memory assets_) Strategy(treasury) {
         _setAssets(assets_);
@@ -26,6 +27,14 @@ contract MockStrategy is Strategy {
 
     function ASSETS() external view override returns (address[] memory assets) {
         assets = supportedAssets;
+    }
+
+    function TVL() external view override returns (uint256[] memory _tvl) {
+        _tvl = tvl;
+    }
+
+    function _setTvl(uint256[] memory _tvl) external {
+        tvl = _tvl;
     }
 
     function _setAssets(address[] memory assets_) internal {

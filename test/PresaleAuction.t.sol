@@ -3,6 +3,7 @@ pragma solidity 0.8.34;
 
 import {PresaleAuction} from "../src/policies/PresaleAuction.sol";
 import {Minter} from "../src/modules/MINTR/Minter.sol";
+import {Module} from "enten-v1/Module.sol";
 import {Controller} from "enten-v1/Controller.sol";
 import {Kernel} from "enten-v1/Kernel.sol";
 import {Token} from "enten-v1/Token.sol";
@@ -38,6 +39,9 @@ contract PresaleAuctionTest is Test {
     address internal holder = makeAddr("Holder");
     address internal buyer = makeAddr("Buyer");
     address internal protocolCollector = makeAddr("Protocol Collector");
+    address internal stranger = makeAddr("Stranger");
+
+    event PresaleAuction__Open(uint256 startTime, uint256 startPrice, uint256 floor);
 
     function setUp() public {
         vm.warp(1_000);
@@ -64,23 +68,29 @@ contract PresaleAuctionTest is Test {
         controller.executeAction(Actions.InstallModule, address(minter));
         controller.setMintPermission(Keycode.wrap("MINTR"), true);
         controller.executeAction(Actions.ActivatePolicy, address(presale));
+        presale.open();
         vm.stopPrank();
     }
 
-    function testConstructorStoresInitialState() public view {
-        assertEq(address(presale.KERNEL()), address(kernel));
-        assertEq(address(presale.TOKEN()), address(token));
-        assertEq(presale.ASSET(), address(asset));
-        assertEq(presale.PRESALE_SIZE(), PRESALE_SIZE);
-        assertEq(presale.START_PRICE(), START_PRICE);
-        assertEq(presale.VIRTUAL_TOKEN_RESERVE(), VIRTUAL_TOKEN_RESERVE);
-        assertEq(presale.DURATION(), DURATION);
-        assertEq(presale.MIN_BID(), MIN_BID);
-        assertEq(presale.remaining(), PRESALE_SIZE);
-        assertEq(presale.currentPremium(), 0);
-        assertFalse(presale.premiumInitialized());
-        assertEq(presale.startTime(), 1_000);
-        assertEq(presale.lastPriceUpdate(), 1_000);
+    function testConstructorStoresInitialState() public {
+        PresaleAuction fresh =
+            _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, VIRTUAL_TOKEN_RESERVE, DURATION, MIN_BID);
+
+        assertEq(address(fresh.KERNEL()), address(kernel));
+        assertEq(address(fresh.TOKEN()), address(token));
+        assertEq(fresh.ASSET(), address(asset));
+        assertEq(fresh.ADMIN(), admin);
+        assertEq(fresh.PRESALE_SIZE(), PRESALE_SIZE);
+        assertEq(fresh.START_PRICE(), START_PRICE);
+        assertEq(fresh.VIRTUAL_TOKEN_RESERVE(), VIRTUAL_TOKEN_RESERVE);
+        assertEq(fresh.DURATION(), DURATION);
+        assertEq(fresh.MIN_BID(), MIN_BID);
+        assertEq(fresh.remaining(), PRESALE_SIZE);
+        assertEq(fresh.currentPremium(), 0);
+        assertFalse(fresh.premiumInitialized());
+        // The clock is not started at construction; open() anchors it.
+        assertEq(fresh.startTime(), 0);
+        assertEq(fresh.lastPriceUpdate(), 0);
     }
 
     function testConstructorRejectsInvalidParameters() public {
@@ -107,6 +117,18 @@ contract PresaleAuctionTest is Test {
 
         vm.expectRevert(PresaleAuction.PresaleAuction__InvalidConfig.selector);
         _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, VIRTUAL_TOKEN_RESERVE, 7 days + 1, MIN_BID);
+
+        vm.expectRevert(PresaleAuction.PresaleAuction__InvalidConfig.selector);
+        new PresaleAuction(
+            address(controller),
+            address(asset),
+            address(0),
+            PRESALE_SIZE,
+            START_PRICE,
+            VIRTUAL_TOKEN_RESERVE,
+            DURATION,
+            MIN_BID
+        );
     }
 
     function testPolicyConfiguresMinterDependencyAndPermission() public view {
@@ -119,6 +141,82 @@ contract PresaleAuctionTest is Test {
         assertEq(permissions.length, 1);
         assertEq(Keycode.unwrap(permissions[0].keycode), Keycode.unwrap(toKeycode("MINTR")));
         assertEq(permissions[0].funcSelector, Minter.mint.selector);
+    }
+
+    function testOpenStartsClockFromCallTimeAndEmits() public {
+        PresaleAuction fresh =
+            _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, VIRTUAL_TOKEN_RESERVE, DURATION, MIN_BID);
+
+        // Clock must run from open(), not construction: warp well past deploy before opening.
+        uint256 openTime = block.timestamp + 5 hours;
+        vm.warp(openTime);
+
+        uint256 floor = fresh.minimumPrice();
+
+        vm.expectEmit(false, false, false, true, address(fresh));
+        emit PresaleAuction__Open(openTime, START_PRICE, floor);
+
+        vm.prank(admin);
+        fresh.open();
+
+        assertEq(fresh.startTime(), openTime);
+        assertEq(fresh.lastPriceUpdate(), openTime);
+        // Full premium is live at open regardless of the deploy->open delay.
+        assertEq(fresh.price(), START_PRICE);
+
+        // Decay and the sale window are measured from open(), not from deployment.
+        vm.warp(openTime + DURATION / 2);
+        assertEq(fresh.price(), START_PRICE - (START_PRICE - floor) / 2);
+
+        vm.warp(openTime + DURATION);
+        assertEq(fresh.price(), floor);
+    }
+
+    function testBuyRevertsBeforeOpen() public {
+        PresaleAuction fresh =
+            _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, VIRTUAL_TOKEN_RESERVE, DURATION, MIN_BID);
+
+        vm.expectRevert(PresaleAuction.PresaleAuction__NotOpen.selector);
+        vm.prank(buyer);
+        fresh.buy(MIN_BID, type(uint256).max, block.timestamp);
+    }
+
+    function testOpenRevertsForNonAdmin() public {
+        PresaleAuction fresh =
+            _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, VIRTUAL_TOKEN_RESERVE, DURATION, MIN_BID);
+
+        vm.expectRevert(PresaleAuction.PresaleAuction__NotAdmin.selector);
+        vm.prank(stranger);
+        fresh.open();
+    }
+
+    function testOpenRevertsWhenAlreadyOpen() public {
+        vm.expectRevert(PresaleAuction.PresaleAuction__AlreadyOpen.selector);
+        vm.prank(admin);
+        presale.open();
+    }
+
+    function testOpenRevertsWhenStartPriceBelowFloor() public {
+        PresaleAuction lowStart =
+            _deployPresale(address(asset), PRESALE_SIZE, 1 ether, VIRTUAL_TOKEN_RESERVE, DURATION, MIN_BID);
+
+        // 1 ether is below the fee-grossed floor, so the premium would be a no-op; open() must reject it.
+        assertLt(1 ether, lowStart.minimumPrice());
+
+        vm.expectRevert(PresaleAuction.PresaleAuction__StartPriceBelowFloor.selector);
+        vm.prank(admin);
+        lowStart.open();
+    }
+
+    function testOpenRevertsWhenBackingUnseeded() public {
+        PresaleAuction fresh =
+            _deployPresale(address(asset), PRESALE_SIZE, START_PRICE, VIRTUAL_TOKEN_RESERVE, DURATION, MIN_BID);
+
+        _setBucket(IVault.Bucket.Redeem, address(asset), 0);
+
+        vm.expectRevert(PresaleAuction.PresaleAuction__UnseededAsset.selector);
+        vm.prank(admin);
+        fresh.open();
     }
 
     function testPriceDecaysFromStartPriceToFeeGrossedBackingFloor() public {
@@ -280,6 +378,124 @@ contract PresaleAuctionTest is Test {
         presale.price();
     }
 
+    // --- T3: floor rises across consecutive buys ---
+
+    function testMultipleBuysRaiseFloor() public {
+        // At open the premium is live, so each buy deposits strictly more than backingPerToken*amount
+        // into backing, raising the floor for the next buyer.
+        uint256 floorBefore = presale.minimumPrice();
+
+        for (uint256 i = 0; i < 3; i++) {
+            uint256 payment = _quotePayment(MIN_BID);
+            _fundAndApproveBuyer(payment);
+            vm.prank(buyer);
+            presale.buy(MIN_BID, payment, block.timestamp);
+
+            uint256 floorAfter = presale.minimumPrice();
+            assertGt(floorAfter, floorBefore);
+            floorBefore = floorAfter;
+        }
+    }
+
+    // --- #8: low-premium buy with a fractional backing ratio must not revert on the core invariant ---
+
+    function testBuyAtLowPremiumWithFractionalBackingSucceeds() public {
+        // Make totalBacking*WAD/supply non-integer so the floored backingPerToken loses sub-wei precision
+        // relative to the core's ceil-preserved backing requirement.
+        asset.mint(address(vault), 777);
+        _setBucket(IVault.Bucket.Redeem, address(asset), INITIAL_BACKING + 777);
+
+        // Drive the premium to its minimum reachable value, just before the hard close.
+        vm.warp(presale.startTime() + DURATION - 1);
+
+        uint256 bptBefore = _backingPerToken();
+        uint256 amount = MIN_BID + 3; // non-round amount to stress the rounding
+        uint256 payment = _quotePayment(amount);
+        _fundAndApproveBuyer(payment);
+
+        // Must settle without tripping Controller__BackingBelowFloor on rounding.
+        vm.prank(buyer);
+        presale.buy(amount, payment, block.timestamp);
+
+        assertGe(_backingPerToken(), bptBefore);
+    }
+
+    // --- T1: backing-per-token never decreases across arbitrary buy sequences ---
+
+    function testFuzzBackingPerTokenNeverDecreasesAcrossBuys(
+        uint256 teamBps,
+        uint256 treasuryBps,
+        uint96[4] memory rawAmounts
+    ) public {
+        // Arbitrary (valid) fee split: team + treasury < BPS so backing keeps a positive residual.
+        teamBps = bound(teamBps, 0, 4_500);
+        treasuryBps = bound(treasuryBps, 0, 4_500);
+        _setPaymentBps(teamBps, treasuryBps);
+
+        uint256 prev = _backingPerToken();
+
+        for (uint256 i = 0; i < rawAmounts.length; i++) {
+            uint256 remaining = presale.remaining();
+            if (remaining < MIN_BID) break;
+
+            uint256 amount = bound(uint256(rawAmounts[i]), MIN_BID, remaining);
+            uint256 payment = _quotePayment(amount);
+            _fundAndApproveBuyer(payment);
+
+            vm.prank(buyer);
+            presale.buy(amount, payment, block.timestamp);
+
+            uint256 current = _backingPerToken();
+            assertGe(current, prev);
+            prev = current;
+        }
+    }
+
+    // --- T5: buy reverts (atomically) when the buyer cannot pay ---
+
+    function testBuyRevertsWhenBuyerHasNotApproved() public {
+        uint256 payment = _quotePayment(MIN_BID);
+        asset.mint(buyer, payment); // funded, but no allowance to the vault
+
+        vm.expectRevert();
+        vm.prank(buyer);
+        presale.buy(MIN_BID, payment, block.timestamp);
+
+        assertEq(token.balanceOf(buyer), 0);
+        assertEq(presale.remaining(), PRESALE_SIZE);
+        assertEq(presale.sold(), 0);
+    }
+
+    function testBuyRevertsWhenBuyerUnderfunded() public {
+        uint256 payment = _quotePayment(MIN_BID);
+        vm.prank(buyer);
+        asset.approve(address(vault), payment); // approved, but holds no balance
+
+        vm.expectRevert();
+        vm.prank(buyer);
+        presale.buy(MIN_BID, payment, block.timestamp);
+
+        assertEq(token.balanceOf(buyer), 0);
+        assertEq(presale.remaining(), PRESALE_SIZE);
+        assertEq(presale.sold(), 0);
+    }
+
+    // --- T4: Minter module rejects unpermissioned callers ---
+
+    function testMinterMintRevertsForUnpermissionedCaller() public {
+        IController.Receipt[] memory receipts = new IController.Receipt[](1);
+        receipts[0] = IController.Receipt({asset: address(asset), amount: 1});
+
+        vm.expectRevert(abi.encodeWithSelector(Module.Module__PolicyNotPermitted.selector, address(this)));
+        minter.mint(address(this), MIN_BID, receipts);
+    }
+
+    function _backingPerToken() internal view returns (uint256) {
+        uint256 backing = _bucketValue(IVault.Bucket.Redeem, address(asset));
+        uint256 supply = token.totalSupply(); // team-locked tokens are zero in this harness
+        return supply == 0 ? 0 : backing * WAD / supply;
+    }
+
     function _deployPresale(
         address asset_,
         uint256 presaleSize,
@@ -289,7 +505,7 @@ contract PresaleAuctionTest is Test {
         uint256 minBid
     ) internal returns (PresaleAuction) {
         return new PresaleAuction(
-            address(controller), asset_, presaleSize, startPrice, virtualTokenReserve, duration, minBid
+            address(controller), asset_, admin, presaleSize, startPrice, virtualTokenReserve, duration, minBid
         );
     }
 
@@ -361,6 +577,8 @@ contract PresaleAuctionTest is Test {
     }
 
     function _grossedPrice(uint256 targetBackingPerToken) internal view returns (uint256) {
+        // Mirror the +1-wei ceil cushion applied in PresaleAuction.minimumPrice.
+        targetBackingPerToken += 1;
         uint256 teamBps = uint256(kernel.viewData(Slots.TEAM_PERCENTAGE_SLOT));
         uint256 treasuryBps = uint256(kernel.viewData(Slots.TREASURY_PERCENTAGE_SLOT));
         uint256 backingBps = BPS - teamBps - treasuryBps;

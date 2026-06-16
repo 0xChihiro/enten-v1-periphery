@@ -632,8 +632,8 @@ contract BorrowPolicyTest is Test {
         controller.executeAction(Actions.InstallModule, address(adminModule));
         controller.executeAction(Actions.ActivatePolicy, address(gateway));
         controller.grantRole(controller.EXECUTOR_ROLE(), address(adminModule));
-        gateway.addAsset(first);
-        gateway.addAsset(second);
+        gateway.addAsset(first, 1e27);
+        gateway.addAsset(second, 1e27);
         vm.stopPrank();
     }
 

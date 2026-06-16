@@ -675,6 +675,123 @@ contract EntenDeflationHookTest is Test {
         assertEq(enten.balanceOf(address(hook)), 0);
     }
 
+    // --- Native-ETH pair: ENTEN paired with native ETH (currency0 == address(0)). ---
+    // The hook only ever takes/burns ENTEN, never the counter currency, so the burn accounting must be
+    // identical to an ERC20 pair. These tests prove the v4 flash-accounting deltas still settle against the
+    // real PoolManager when the other side is native ETH. A swap that didn't balance would revert in the PM.
+
+    function testNativeEthBuyBurnsOutputEnten() public {
+        _deployFixture(false);
+        PoolKey memory ethKey = _deployEthEntenPool();
+
+        uint256 supplyBefore = enten.totalSupply();
+
+        // Buy ENTEN with ETH: ETH is currency0, so zeroForOne == true; ENTEN leaves the pool and is burned.
+        _swapEthForEnten(ethKey, 1_000 ether);
+
+        assertGt(supplyBefore - enten.totalSupply(), 0); // output ENTEN was burned
+        assertEq(enten.balanceOf(address(hook)), 0); // immediate burn holds nothing
+        assertEq(hook.accruedSellBurns(), 0); // buys never accrue
+    }
+
+    function testNativeEthSellAccruesThenBurns() public {
+        _deployFixture(false);
+        PoolKey memory ethKey = _deployEthEntenPool();
+
+        uint256 amountIn = 1_000 ether;
+        uint256 expectedBurn = _feeAmount(amountIn);
+        uint256 supplyBefore = enten.totalSupply();
+        uint256 ethBefore = address(this).balance;
+
+        // Sell ENTEN for ETH: ENTEN is currency1, so zeroForOne == false; input fee accrues, ETH paid out.
+        _swapEntenForEth(ethKey, amountIn);
+
+        assertEq(hook.accruedSellBurns(), expectedBurn);
+        assertEq(enten.totalSupply(), supplyBefore); // not burned until burnAccrued()
+        assertGt(address(this).balance, ethBefore); // received native ETH proceeds
+
+        hook.burnAccrued();
+
+        assertEq(supplyBefore - enten.totalSupply(), expectedBurn);
+        assertEq(hook.accruedSellBurns(), 0);
+        assertEq(enten.balanceOf(address(hook)), 0);
+    }
+
+    function testNativeEthExactOutputBuyBurnsOutputEnten() public {
+        _deployFixture(false);
+        PoolKey memory ethKey = _deployEthEntenPool();
+
+        uint256 supplyBefore = enten.totalSupply();
+
+        // Exact-output buy of ENTEN for ETH (over-fund ETH; the router refunds the remainder).
+        _swapEthForExactEnten(ethKey, 500 ether, 100_000 ether);
+
+        assertGt(supplyBefore - enten.totalSupply(), 0);
+        assertEq(enten.balanceOf(address(hook)), 0);
+        assertEq(hook.accruedSellBurns(), 0);
+    }
+
+    function testNativeEthBurnMatchesExpectedFeeSemantics() public {
+        _deployFixture(false);
+        PoolKey memory ethKey = _deployEthEntenPool();
+
+        // ENTEN-side accounting must be independent of the counter currency: a sell of `amountIn` burns
+        // exactly _feeAmount(amountIn), the same as the ERC20-pair path.
+        uint256 amountIn = 2_500 ether;
+        _swapEntenForEth(ethKey, amountIn);
+        assertEq(hook.accruedSellBurns(), _feeAmount(amountIn));
+    }
+
+    receive() external payable {}
+
+    function _deployEthEntenPool() internal returns (PoolKey memory key) {
+        vm.deal(address(this), 1_000_000 ether);
+
+        // address(0) (native ETH) sorts below any token, so ETH is currency0 and ENTEN is currency1.
+        (Currency currency0, Currency currency1) = _sort(address(0), address(enten));
+        key = PoolKey({
+            currency0: currency0, currency1: currency1, fee: 3000, tickSpacing: 60, hooks: IHooks(address(hook))
+        });
+        assertEq(Currency.unwrap(key.currency0), address(0));
+
+        manager.initialize(key, SQRT_PRICE_1_1);
+        modifyLiquidityRouter.modifyLiquidity{value: 200_000 ether}(
+            key,
+            ModifyLiquidityParams({tickLower: -887220, tickUpper: 887220, liquidityDelta: 1e22, salt: 0}),
+            ZERO_BYTES
+        );
+    }
+
+    function _swapEthForEnten(PoolKey memory key, uint256 ethIn) internal returns (BalanceDelta) {
+        return swapRouter.swap{value: ethIn}(
+            key,
+            SwapParams({zeroForOne: true, amountSpecified: -ethIn.toInt256(), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ZERO_BYTES
+        );
+    }
+
+    function _swapEthForExactEnten(PoolKey memory key, uint256 entenOut, uint256 ethBudget)
+        internal
+        returns (BalanceDelta)
+    {
+        return swapRouter.swap{value: ethBudget}(
+            key,
+            SwapParams({zeroForOne: true, amountSpecified: entenOut.toInt256(), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ZERO_BYTES
+        );
+    }
+
+    function _swapEntenForEth(PoolKey memory key, uint256 entenIn) internal returns (BalanceDelta) {
+        return swapRouter.swap(
+            key,
+            SwapParams({zeroForOne: false, amountSpecified: -entenIn.toInt256(), sqrtPriceLimitX96: MAX_PRICE_LIMIT}),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ZERO_BYTES
+        );
+    }
+
     function _deployFixture(bool entenAsCurrency0) internal {
         _deployFixture({entenAsCurrency0: entenAsCurrency0, activateHook: true});
     }

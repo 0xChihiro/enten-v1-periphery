@@ -23,7 +23,7 @@ contract EntenDeflationHook is IHooks, IUnlockCallback, Policy {
     using SafeCast for uint256;
 
     uint256 public constant BPS = 10_000;
-    uint256 public constant BURN_BPS = 70;
+    uint256 public constant BURN_BPS = 80;
 
     IPoolManager public immutable POOL_MANAGER;
     Currency public immutable ENTEN;
@@ -98,6 +98,15 @@ contract EntenDeflationHook is IHooks, IUnlockCallback, Policy {
         return IHooks.beforeInitialize.selector;
     }
 
+    /// @dev KNOWN ISSUE (accepted): exact-input ENTEN sells and exact-output ENTEN buys pre-charge the burn
+    ///      here from the REQUESTED `amountSpecified`, before the swap executes. Exact-input sells must be
+    ///      taxed here because the input ENTEN is consumed by the swap and is no longer available to tax in
+    ///      `afterSwap`. If such a swap only PARTIALLY fills (it hits `sqrtPriceLimitX96`), the burn was still
+    ///      taken on the full requested amount, so the trader pays a slightly larger burn than their actual
+    ///      filled amount warrants. This is bounded (0.8% of the unfilled remainder), only occurs when an
+    ///      explicit price limit is reached (the common no-limit / slippage-checked path always fully fills),
+    ///      and is protocol-neutral-to-positive since the extra burn accrues to backing. Exact-input buys and
+    ///      exact-output sells are taxed from the ACTUAL `afterSwap` deltas and are unaffected.
     function beforeSwap(address, PoolKey calldata key, SwapParams calldata params, bytes calldata)
         external
         onlyPoolManager

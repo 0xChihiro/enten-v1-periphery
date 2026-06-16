@@ -12,10 +12,5 @@ abstract contract MINTR is Module {
         return toKeycode("MINTR");
     }
 
-    function mint(
-        address user,
-        uint256 mintAmount,
-        IController.Receipt[] calldata receipts,
-        IController.StateUpdate[] calldata updates
-    ) external virtual;
+    function mint(address user, uint256 mintAmount, IController.Receipt[] calldata receipts) external virtual;
 }

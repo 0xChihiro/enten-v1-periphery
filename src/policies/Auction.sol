@@ -167,9 +167,8 @@ contract Auction is ReentrancyGuard, Policy {
             }
         }
 
-        IController.StateUpdate[] memory updates = new IController.StateUpdate[](0);
         remainingLot -= mintAmount;
-        minter.mint(msg.sender, mintAmount, receipts, updates);
+        minter.mint(msg.sender, mintAmount, receipts);
         sold += mintAmount;
         for (uint256 i = 0; i < receipts.length;) {
             revenue[receipts[i].asset] += receipts[i].amount;

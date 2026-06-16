@@ -70,6 +70,7 @@ contract AdminTest is Test {
 
     event Gateway__Fees(address indexed feeAdmin, uint256 backing, uint256 team, uint256 treasury);
     event Gateway__AssetAdded(address indexed assetAdmin, address indexed newAsset, uint256 newAssetsLength);
+    event Gateway__BackingFloorSet(address indexed assetAdmin, address indexed asset, uint256 minBackingRatioRay);
 
     function setUp() public {
         uint256 nonce = vm.getNonce(address(this));
@@ -166,7 +167,7 @@ contract AdminTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, assetAdmin, role)
         );
-        gateway.addAsset(address(asset));
+        gateway.addAsset(address(asset), 1e27);
     }
 
     function testOperationalRolesAreSeparated() public {
@@ -179,7 +180,7 @@ contract AdminTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, feeAdmin, assetRole)
         );
-        gateway.addAsset(address(asset));
+        gateway.addAsset(address(asset), 1e27);
 
         vm.prank(assetAdmin);
         vm.expectRevert(
@@ -278,7 +279,7 @@ contract AdminTest is Test {
         emit Gateway__AssetAdded(assetAdmin, address(asset), 1);
 
         vm.prank(assetAdmin);
-        gateway.addAsset(address(asset));
+        gateway.addAsset(address(asset), 1e27);
 
         assertEq(uint256(kernel.viewData(Slots.ASSETS_LENGTH_SLOT)), 1);
         bytes memory rawAssets = kernel.viewData(Slots.ASSETS_BASE_SLOT, 1);
@@ -293,7 +294,7 @@ contract AdminTest is Test {
 
         vm.prank(assetAdmin);
         vm.expectRevert(abi.encodeWithSelector(IController.Controller__ModuleDisabled.selector, adminKeycode));
-        gateway.addAsset(address(asset));
+        gateway.addAsset(address(asset), 1e27);
 
         assertEq(uint256(kernel.viewData(Slots.ASSETS_LENGTH_SLOT)), 0);
     }
@@ -304,17 +305,17 @@ contract AdminTest is Test {
 
         vm.prank(assetAdmin);
         vm.expectRevert(IController.Controller__SettlementsPaused.selector);
-        gateway.addAsset(address(asset));
+        gateway.addAsset(address(asset), 1e27);
 
         assertEq(uint256(kernel.viewData(Slots.ASSETS_LENGTH_SLOT)), 0);
     }
 
     function testAddAssetAppendsSecondNonDuplicateAsset() public {
         vm.prank(assetAdmin);
-        gateway.addAsset(address(asset));
+        gateway.addAsset(address(asset), 1e27);
 
         vm.prank(assetAdmin);
-        gateway.addAsset(address(secondAsset));
+        gateway.addAsset(address(secondAsset), 1e27);
 
         assertEq(uint256(kernel.viewData(Slots.ASSETS_LENGTH_SLOT)), 2);
         bytes memory rawAssets = kernel.viewData(Slots.ASSETS_BASE_SLOT, 2);
@@ -327,38 +328,38 @@ contract AdminTest is Test {
 
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, user, role));
-        gateway.addAsset(address(asset));
+        gateway.addAsset(address(asset), 1e27);
     }
 
     function testAddAssetRejectsZeroAddress() public {
         vm.prank(assetAdmin);
         vm.expectRevert(Gateway.Gateway__AssetAddressZero.selector);
-        gateway.addAsset(address(0));
+        gateway.addAsset(address(0), 1e27);
     }
 
     function testAddAssetRejectsNonContractAddressAndPreservesLength() public {
         vm.prank(assetAdmin);
         vm.expectRevert(abi.encodeWithSelector(TargetNotAContract.selector, user));
-        gateway.addAsset(user);
+        gateway.addAsset(user, 1e27);
 
         assertEq(uint256(kernel.viewData(Slots.ASSETS_LENGTH_SLOT)), 0);
     }
 
     function testAddAssetRejectsDuplicateAndPreservesLength() public {
         vm.prank(assetAdmin);
-        gateway.addAsset(address(asset));
+        gateway.addAsset(address(asset), 1e27);
 
         vm.prank(assetAdmin);
         vm.expectRevert(Gateway.Gateway__DuplicateAsset.selector);
-        gateway.addAsset(address(asset));
+        gateway.addAsset(address(asset), 1e27);
 
         assertEq(uint256(kernel.viewData(Slots.ASSETS_LENGTH_SLOT)), 1);
     }
 
     function testV1AssetRegistryCannotBeDelistedThroughGatewayOrDirectAdminModuleCall() public {
         vm.startPrank(assetAdmin);
-        gateway.addAsset(address(asset));
-        gateway.addAsset(address(secondAsset));
+        gateway.addAsset(address(asset), 1e27);
+        gateway.addAsset(address(secondAsset), 1e27);
         vm.stopPrank();
 
         IController.StateUpdate[] memory updates = new IController.StateUpdate[](2);
@@ -442,7 +443,7 @@ contract AdminTest is Test {
         assertEq(address(gateway.adminModule()), address(newAdminModule));
 
         vm.prank(assetAdmin);
-        gateway.addAsset(address(asset));
+        gateway.addAsset(address(asset), 1e27);
 
         assertEq(uint256(kernel.viewData(Slots.ASSETS_LENGTH_SLOT)), 1);
         bytes memory rawAssets = kernel.viewData(Slots.ASSETS_BASE_SLOT, 1);
@@ -462,6 +463,121 @@ contract AdminTest is Test {
 
         assertTrue(controller.isPolicyActive(address(gateway)));
         assertFalse(controller.isPolicyActive(address(inactiveGateway)));
+    }
+
+    // --- T2: min-backing guard (F1) ---
+
+    function testSetFeesRejectsBackingBelowMinAndPreservesState() public {
+        // Sum is valid (9750) but backing < MIN_BACKING_BPS (5000), so the new guard must reject it.
+        vm.prank(feeAdmin);
+        vm.expectRevert(Gateway.Gateway__InvalidFeeConfiguration.selector);
+        gateway.setFees(4_000, 5_750, 0);
+
+        assertEq(uint256(kernel.viewData(Slots.BACKING_PERCENTAGE_SLOT)), 0);
+        assertEq(uint256(kernel.viewData(Slots.TEAM_PERCENTAGE_SLOT)), 0);
+        assertEq(uint256(kernel.viewData(Slots.TREASURY_PERCENTAGE_SLOT)), 0);
+    }
+
+    function testSetFeesAcceptsBackingAtMinBoundary() public {
+        // backing == MIN_BACKING_BPS is allowed (guard is strict `<`).
+        vm.prank(feeAdmin);
+        gateway.setFees(5_000, 4_750, 0);
+
+        assertEq(uint256(kernel.viewData(Slots.BACKING_PERCENTAGE_SLOT)), 5_000);
+        assertEq(uint256(kernel.viewData(Slots.TEAM_PERCENTAGE_SLOT)), 4_750);
+        assertEq(uint256(kernel.viewData(Slots.TREASURY_PERCENTAGE_SLOT)), 0);
+    }
+
+    // --- T2: addAsset backing floor (F8) ---
+
+    function testAddAssetSetsBackingFloor() public {
+        vm.expectEmit(true, true, false, true, address(gateway));
+        emit Gateway__BackingFloorSet(assetAdmin, address(asset), 1e15);
+
+        vm.prank(assetAdmin);
+        gateway.addAsset(address(asset), 1e15);
+
+        assertEq(uint256(kernel.viewData(Slots.ASSETS_LENGTH_SLOT)), 1);
+        assertEq(_floorOf(address(asset)), 1e15);
+    }
+
+    function testAddAssetRejectsZeroFloorAndPreservesState() public {
+        vm.prank(assetAdmin);
+        vm.expectRevert(Gateway.Gateway__BackingFloorNotSet.selector);
+        gateway.addAsset(address(asset), 0);
+
+        assertEq(uint256(kernel.viewData(Slots.ASSETS_LENGTH_SLOT)), 0);
+        assertEq(_floorOf(address(asset)), 0);
+    }
+
+    // --- T2: setBackingFloor safety setter ---
+
+    function testSetBackingFloorUpdatesFloorPreBootstrap() public {
+        vm.prank(assetAdmin);
+        gateway.addAsset(address(asset), 1e15);
+
+        _setEffectiveSupplyZero();
+
+        vm.expectEmit(true, true, false, true, address(gateway));
+        emit Gateway__BackingFloorSet(assetAdmin, address(asset), 2e15);
+
+        vm.prank(assetAdmin);
+        gateway.setBackingFloor(address(asset), 2e15);
+
+        assertEq(_floorOf(address(asset)), 2e15);
+    }
+
+    function testSetBackingFloorRevertsAfterBootstrapAndPreservesFloor() public {
+        vm.prank(assetAdmin);
+        gateway.addAsset(address(asset), 1e15);
+
+        // effectiveSupply is INITIAL_SUPPLY here (token minted at setUp), i.e. already bootstrapped.
+        vm.prank(assetAdmin);
+        vm.expectRevert(Gateway.Gateway__SupplyAlreadyBootstrapped.selector);
+        gateway.setBackingFloor(address(asset), 2e15);
+
+        assertEq(_floorOf(address(asset)), 1e15);
+    }
+
+    function testSetBackingFloorRevertsForUnregisteredAsset() public {
+        _setEffectiveSupplyZero();
+
+        vm.prank(assetAdmin);
+        vm.expectRevert(Gateway.Gateway__AssetNotRegistered.selector);
+        gateway.setBackingFloor(address(secondAsset), 1e15);
+    }
+
+    function testSetBackingFloorRejectsZeroFloor() public {
+        vm.prank(assetAdmin);
+        gateway.addAsset(address(asset), 1e15);
+        _setEffectiveSupplyZero();
+
+        vm.prank(assetAdmin);
+        vm.expectRevert(Gateway.Gateway__BackingFloorNotSet.selector);
+        gateway.setBackingFloor(address(asset), 0);
+
+        assertEq(_floorOf(address(asset)), 1e15);
+    }
+
+    function testSetBackingFloorRequiresAssetRole() public {
+        vm.prank(assetAdmin);
+        gateway.addAsset(address(asset), 1e15);
+        _setEffectiveSupplyZero();
+
+        bytes32 role = gateway.assetRole();
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, user, role));
+        gateway.setBackingFloor(address(asset), 2e15);
+    }
+
+    function _setEffectiveSupplyZero() internal {
+        // effectiveSupply = totalSupply - TEAM_LOCKED_TOKENS; lock the whole supply to drive it to zero.
+        vm.prank(address(controller));
+        kernel.updateState(Slots.TEAM_LOCKED_TOKENS_SLOT, bytes32(INITIAL_SUPPLY));
+    }
+
+    function _floorOf(address asset_) internal view returns (uint256) {
+        return uint256(kernel.viewData(Slots.slots(Slots.MIN_BACKING_RATIO_RAY_BASE_SLOT, asset_)));
     }
 
     function _setRawFeeSlots(uint256 backing, uint256 team, uint256 treasury) internal {
