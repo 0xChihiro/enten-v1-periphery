@@ -18,13 +18,20 @@ import {Actions, toKeycode} from "enten-v1/Utils.sol";
 
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
+import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
+import {PoolKey} from "v4-core/src/types/PoolKey.sol";
+import {Currency} from "v4-core/src/types/Currency.sol";
+import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 
 import {IERC20} from "openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {Math} from "openzeppelin/contracts/utils/math/Math.sol";
 
 /// @notice Deploys and wires this round's periphery: Minter (MINTR), Admin (ADMIN) and Burner (BRNER) modules,
-///         plus the Gateway, PresaleAuction and EntenDeflationHook policies. The Auction policy is intentionally
-///         out of scope. Governance is a single EOA admin (no timelock handoff). The audited core
-///         (Kernel/Vault/Token/Controller) must already be deployed.
+///         plus the Gateway, PresaleAuction and EntenDeflationHook policies, and finally creates + initializes
+///         the ENTEN/USDm Uniswap v4 pool (0.2% fee, tickSpacing 60) wired to the hook — initialize only, no
+///         liquidity. The Auction policy is intentionally out of scope. Governance is a single EOA admin (no
+///         timelock handoff). The core (Kernel/Vault/Token/Controller) must already be deployed.
 ///
 /// @dev    The broadcasting key MUST be the controller admin: every wiring call below is role-gated
 ///         (EXECUTOR_ROLE / MINT_PERMISSION_ROLE / DEFAULT_ADMIN / CREDITOR_ROLE), and `presale.open()` is
@@ -58,7 +65,7 @@ contract DeployPeripheryScript is Script {
     uint256 internal constant BACKING_SEED_AMOUNT = 1_000e18;
 
     // Canonical deterministic CREATE2 factory that Foundry routes salted `new{salt:...}` through.
-    address internal constant CREATE2_FACTORY = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
+    // `CREATE2_FACTORY` (0x4e59...4956C) is inherited from forge-std's Base/Script.
 
     // Permission-flag bits the EntenDeflationHook's address must encode (must match getHookPermissions()).
     uint160 internal constant HOOK_FLAGS = uint160(
@@ -66,31 +73,107 @@ contract DeployPeripheryScript is Script {
             | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
     );
 
-    function run() public {
+    /*--------------------------------------------------------------------------*/
+    /*  ENTEN/USDm v4 POOL — initialized (no liquidity) with the deflation hook  */
+    /*--------------------------------------------------------------------------*/
+
+    // Custom 0.2% static fee, in hundredths of a bip (1_000_000 = 100%).
+    uint24 internal constant POOL_FEE = 2_000;
+    // 60 matches the canonical 0.3% pools; the hook imposes no tick-spacing constraint.
+    int24 internal constant POOL_TICK_SPACING = 60;
+
+    // Starting price as a ratio of EQUAL-VALUE human amounts: PRICE_ENTEN_UNITS ENTEN == PRICE_USDM_UNITS USDm.
+    // 100 ENTEN == 1 USDm => 1 ENTEN = 0.01 USDm (~100k FDV at a 10M max supply). Decimal scaling to each
+    // token's wei is handled at runtime via decimals(), so these are human-unit integers only.
+    uint256 internal constant PRICE_ENTEN_UNITS = 100;
+    uint256 internal constant PRICE_USDM_UNITS = 1;
+
+    /// @notice Addresses of every contract this script deploys, threaded between the helper steps.
+    struct Deployed {
+        Minter minter;
+        Admin adminModule;
+        BurnerModule burner;
+        Gateway gateway;
+        PresaleAuction presale;
+        EntenDeflationHook hook;
+    }
+
+    function run() public returns (Deployed memory d) {
         uint256 deployerPk = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address admin = vm.envAddress("ADMIN_ADDRESS");
-        address controllerAddr = vm.envAddress("CONTROLLER_ADDRESS");
-        address poolManager = vm.envAddress("POOL_MANAGER_ADDRESS");
+        IController controller = IController(vm.envAddress("CONTROLLER_ADDRESS"));
         address backingAsset = vm.envAddress("BACKING_ASSET_ADDRESS");
+        // USDm quote token for the ENTEN/USDm pool. Mainnet (megaETH): 0xFAfDdbb3FC7688494971a79cc65DCa3EF82079E7.
+        address usdm = vm.envAddress("USDM_ADDRESS");
 
         // Single-EOA round: the broadcaster must be the admin so role-gated wiring and open() succeed.
         require(admin == vm.addr(deployerPk), "broadcaster must be ADMIN_ADDRESS");
 
-        IController controller = IController(controllerAddr);
-        address kernel = address(controller.KERNEL());
-        address vault = address(controller.VAULT());
+        vm.startBroadcast(deployerPk);
+        d = _deploy(controller, admin, backingAsset);
+        _wire(controller, d, admin, backingAsset);
+        _initializePool(d.hook, usdm);
+        vm.stopBroadcast();
+
+        _log(d);
+    }
+
+    /// @dev Step 9: create + initialize the ENTEN/USDm v4 pool wired to the deflation hook, at the starting
+    ///      price above. Initialize only — no liquidity is seeded. Pool creation is permissionless; the hook's
+    ///      `beforeInitialize` requires ENTEN to be one of the pool currencies. Currencies are sorted by address
+    ///      and the starting `sqrtPriceX96` is computed decimal-safely from each token's `decimals()`.
+    function _initializePool(EntenDeflationHook hook, address usdm) internal {
+        address enten = Currency.unwrap(hook.ENTEN());
+        require(usdm != address(0) && usdm != enten, "bad USDM address");
+
+        // Equal-value raw (wei) amounts at the target price, scaled to each token's decimals.
+        uint256 entenAmt = PRICE_ENTEN_UNITS * (10 ** IERC20Metadata(enten).decimals());
+        uint256 usdmAmt = PRICE_USDM_UNITS * (10 ** IERC20Metadata(usdm).decimals());
+
+        // v4 requires currency0 < currency1. token1-per-token0 (in wei) is the pool price; sqrtPriceX96 is its
+        // square root in Q64.96. mulDiv carries the full 512-bit intermediate before the sqrt.
+        bool entenIsZero = enten < usdm;
+        (Currency currency0, Currency currency1) =
+            entenIsZero ? (hook.ENTEN(), Currency.wrap(usdm)) : (Currency.wrap(usdm), hook.ENTEN());
+        (uint256 amount0, uint256 amount1) = entenIsZero ? (entenAmt, usdmAmt) : (usdmAmt, entenAmt);
+
+        uint256 sqrtPrice = Math.sqrt(Math.mulDiv(amount1, 1 << 192, amount0));
+        require(sqrtPrice >= TickMath.MIN_SQRT_PRICE && sqrtPrice < TickMath.MAX_SQRT_PRICE, "sqrtPrice out of range");
+        // Safe: bounded above by MAX_SQRT_PRICE (< 2^160) by the require directly above.
+        uint160 sqrtPriceX96 = uint160(sqrtPrice);
+
+        PoolKey memory key = PoolKey({
+            currency0: currency0,
+            currency1: currency1,
+            fee: POOL_FEE,
+            tickSpacing: POOL_TICK_SPACING,
+            hooks: IHooks(address(hook))
+        });
+        hook.POOL_MANAGER().initialize(key, sqrtPriceX96);
+
+        console.log("Pool currency0:", Currency.unwrap(currency0));
+        console.log("Pool currency1:", Currency.unwrap(currency1));
+        console.log("Pool sqrtPriceX96:", sqrtPriceX96);
+    }
+
+    /// @dev Steps 1-2: deploy the modules and policies (the hook via a mined CREATE2 salt). Split out of
+    ///      `run` to keep each frame's local count under the stack-too-deep limit.
+    function _deploy(IController controller, address admin, address backingAsset)
+        internal
+        returns (Deployed memory d)
+    {
+        address controllerAddr = address(controller);
+        address poolManager = vm.envAddress("POOL_MANAGER_ADDRESS");
         address entenToken = address(controller.TOKEN());
 
-        vm.startBroadcast(deployerPk);
-
         // 1. Deploy modules.
-        Minter minter = new Minter(controllerAddr);
-        Admin adminModule = new Admin(controllerAddr);
-        BurnerModule burner = new BurnerModule(controllerAddr, kernel, address(0), 0);
+        d.minter = new Minter(controllerAddr);
+        d.adminModule = new Admin(controllerAddr);
+        d.burner = new BurnerModule(controllerAddr, address(controller.KERNEL()), address(0), 0);
 
         // 2. Deploy policies.
-        Gateway gateway = new Gateway(controllerAddr, admin);
-        PresaleAuction presale = new PresaleAuction(
+        d.gateway = new Gateway(controllerAddr, admin);
+        d.presale = new PresaleAuction(
             controllerAddr,
             backingAsset,
             admin,
@@ -103,49 +186,55 @@ contract DeployPeripheryScript is Script {
 
         // 2b. Mine a CREATE2 salt so the hook deploys to an address encoding its permission flags, then deploy.
         (address minedHook, bytes32 hookSalt) = HookMiner.find(
-            CREATE2_FACTORY, HOOK_FLAGS, type(EntenDeflationHook).creationCode, abi.encode(controllerAddr, poolManager, entenToken)
+            CREATE2_FACTORY,
+            HOOK_FLAGS,
+            type(EntenDeflationHook).creationCode,
+            abi.encode(controllerAddr, poolManager, entenToken)
         );
-        EntenDeflationHook hook =
-            new EntenDeflationHook{salt: hookSalt}(controllerAddr, IPoolManager(poolManager), entenToken);
-        require(address(hook) == minedHook, "hook address mismatch");
+        d.hook = new EntenDeflationHook{salt: hookSalt}(controllerAddr, IPoolManager(poolManager), entenToken);
+        require(address(d.hook) == minedHook, "hook address mismatch");
+    }
 
+    /// @dev Steps 3-8: install modules, activate policies, configure fees/assets, seed backing and open the
+    ///      presale. Every call here is role-gated to the broadcasting admin.
+    function _wire(IController controller, Deployed memory d, address admin, address backingAsset) internal {
         // 3. Install modules (must precede the policies that depend on them).
-        controller.executeAction(Actions.InstallModule, address(minter));
-        controller.executeAction(Actions.InstallModule, address(adminModule));
-        controller.executeAction(Actions.InstallModule, address(burner));
+        controller.executeAction(Actions.InstallModule, address(d.minter));
+        controller.executeAction(Actions.InstallModule, address(d.adminModule));
+        controller.executeAction(Actions.InstallModule, address(d.burner));
 
         // 4. Activate policies. Each requests its module permissions on activation:
         //    Gateway -> ADMIN, PresaleAuction -> MINTR.mint, Hook -> BRNER.executeDeflationaryAction.
-        controller.executeAction(Actions.ActivatePolicy, address(gateway));
-        controller.executeAction(Actions.ActivatePolicy, address(presale));
-        controller.executeAction(Actions.ActivatePolicy, address(hook));
+        controller.executeAction(Actions.ActivatePolicy, address(d.gateway));
+        controller.executeAction(Actions.ActivatePolicy, address(d.presale));
+        controller.executeAction(Actions.ActivatePolicy, address(d.hook));
 
         // 5. Enable minting for the MINTR keycode (PresaleAuction is the only activated minting policy this round).
         controller.setMintPermission(toKeycode("MINTR"), true);
 
         // 6. Configure fees and register the backing asset with its bootstrap floor (via the Gateway/Admin module).
-        gateway.setFees(FEE_BACKING, FEE_TEAM, FEE_TREASURY);
-        gateway.addAsset(backingAsset, MIN_BACKING_RATIO_RAY);
+        d.gateway.setFees(FEE_BACKING, FEE_TEAM, FEE_TREASURY);
+        d.gateway.addAsset(backingAsset, MIN_BACKING_RATIO_RAY);
 
         // 7. Seed backing into the Vault's Redeem bucket: transfer the asset in, then sync to credit it.
         controller.grantRole(controller.CREDITOR_ROLE(), admin);
-        require(IERC20(backingAsset).transfer(vault, BACKING_SEED_AMOUNT), "seed transfer failed");
+        require(IERC20(backingAsset).transfer(address(controller.VAULT()), BACKING_SEED_AMOUNT), "seed transfer failed");
         controller.sync(backingAsset, IVault.Bucket.Redeem);
 
         // 8. Open the presale: starts the decay/duration clock and validates START_PRICE > the live floor.
         //    Requires effectiveSupply > 0 (genesis seed already minted) and backing seeded above. See
         //    DEPLOYMENT_NOTES.md if this reverts on a fully team-locked genesis.
         require(effectiveSupply(controller.KERNEL(), controller.TOKEN()) > 0, "effectiveSupply == 0: seed genesis first");
-        presale.open();
+        d.presale.open();
+    }
 
-        vm.stopBroadcast();
-
-        console.log("Minter:        ", address(minter));
-        console.log("Admin module:  ", address(adminModule));
-        console.log("Burner module: ", address(burner));
-        console.log("Gateway:       ", address(gateway));
-        console.log("PresaleAuction:", address(presale));
-        console.log("DeflationHook: ", address(hook));
+    function _log(Deployed memory d) internal pure {
+        console.log("Minter:        ", address(d.minter));
+        console.log("Admin module:  ", address(d.adminModule));
+        console.log("Burner module: ", address(d.burner));
+        console.log("Gateway:       ", address(d.gateway));
+        console.log("PresaleAuction:", address(d.presale));
+        console.log("DeflationHook: ", address(d.hook));
     }
 }
 
