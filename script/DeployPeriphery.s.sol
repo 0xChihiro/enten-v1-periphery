@@ -51,18 +51,18 @@ contract DeployPeripheryScript is Script {
     // Per-asset bootstrap floor, RAY-scaled: minBackingRatioRay = asset_wei * 1e27 / token_wei.
     // Example below is a 1:1 floor for an 18-decimal asset backing an 18-decimal token. For a 6-decimal
     // asset (e.g. USDC) a 1:1 floor would be 1e15, NOT 1e27.
-    uint256 internal constant MIN_BACKING_RATIO_RAY = 1e27;
+    uint256 internal constant MIN_BACKING_RATIO_RAY = 0.1e27;
 
     // PresaleAuction config. START_PRICE/VIRTUAL_TOKEN_RESERVE/MIN_BID are in the asset's "wei per 1e18 token".
-    uint256 internal constant PRESALE_SIZE = 100_000e18;
-    uint256 internal constant PRESALE_START_PRICE = 2e18;
-    uint256 internal constant PRESALE_VIRTUAL_TOKEN_RESERVE = 200_000e18;
-    uint256 internal constant PRESALE_DURATION = 1 days;
+    uint256 internal constant PRESALE_SIZE = 1_000_000e18;
+    uint256 internal constant PRESALE_START_PRICE = 1e18;
+    uint256 internal constant PRESALE_VIRTUAL_TOKEN_RESERVE = 500_000e18;
+    uint256 internal constant PRESALE_DURATION = 5 days;
     uint256 internal constant PRESALE_MIN_BID = 100e18;
 
     // Backing to seed into the Vault's Redeem bucket before opening the presale (in asset wei).
     // The broadcaster must hold at least this much of the backing asset.
-    uint256 internal constant BACKING_SEED_AMOUNT = 1_000e18;
+    uint256 internal constant BACKING_SEED_AMOUNT = 0.1e18;
 
     // Canonical deterministic CREATE2 factory that Foundry routes salted `new{salt:...}` through.
     // `CREATE2_FACTORY` (0x4e59...4956C) is inherited from forge-std's Base/Script.
@@ -225,7 +225,7 @@ contract DeployPeripheryScript is Script {
         //    Requires effectiveSupply > 0 (genesis seed already minted) and backing seeded above. See
         //    DEPLOYMENT_NOTES.md if this reverts on a fully team-locked genesis.
         require(effectiveSupply(controller.KERNEL(), controller.TOKEN()) > 0, "effectiveSupply == 0: seed genesis first");
-        d.presale.open();
+        // d.presale.open();
     }
 
     function _log(Deployed memory d) internal pure {

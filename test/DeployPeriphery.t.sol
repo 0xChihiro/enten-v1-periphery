@@ -51,12 +51,12 @@ contract DeployPeripheryTest is Test {
     uint256 internal constant MAX_SUPPLY = 10_000_000e18;
 
     // Mirror of the script's launch constants used in assertions.
-    uint256 internal constant PRESALE_SIZE = 100_000e18;
-    uint256 internal constant BACKING_SEED_AMOUNT = 1_000e18;
+    uint256 internal constant PRESALE_SIZE = 1_000_000e18;
+    uint256 internal constant BACKING_SEED_AMOUNT = 0.1e18;
     uint256 internal constant FEE_BACKING = 9_000;
     uint256 internal constant FEE_TEAM = 0;
     uint256 internal constant FEE_TREASURY = 750;
-    uint256 internal constant MIN_BACKING_RATIO_RAY = 1e27;
+    uint256 internal constant MIN_BACKING_RATIO_RAY = 0.1e27;
     // Pool: 0.2% fee, tickSpacing 60, starting price 1 ENTEN = 0.01 USDm (100 ENTEN == 1 USDm).
     uint24 internal constant POOL_FEE = 2_000;
     int24 internal constant POOL_TICK_SPACING = 60;
@@ -120,7 +120,7 @@ contract DeployPeripheryTest is Test {
         script = new DeployPeripheryScript();
     }
 
-    function testDeployWiresModulesPoliciesAndOpensPresale() public {
+    function testDeployWiresModulesPoliciesAndDefersPresaleOpen() public {
         // Guard first: a broadcaster that is not the controller admin reverts before any state change.
         // (Kept in this test rather than its own so the shared process-env, mutated below, isn't raced by
         //  Foundry's parallel test execution.)
@@ -169,8 +169,9 @@ contract DeployPeripheryTest is Test {
         assertEq(backingAsset.balanceOf(address(vault)), BACKING_SEED_AMOUNT, "vault asset balance");
         assertEq(backingAsset.balanceOf(admin), 0, "deployer drained seed");
 
-        // --- Presale opened with the full size available ---
-        assertEq(d.presale.startTime(), block.timestamp, "presale opened at now");
+        // --- Presale deployed but intentionally NOT opened at launch (open() is deferred to a later
+        //     admin tx). startTime == 0 is the "not yet opened" sentinel; the full size is still available. ---
+        assertEq(d.presale.startTime(), 0, "presale not opened at launch");
         assertEq(d.presale.ASSET(), address(backingAsset), "presale asset");
         assertEq(d.presale.PRESALE_SIZE(), PRESALE_SIZE, "presale size");
         assertEq(d.presale.remaining(), PRESALE_SIZE, "presale remaining");
