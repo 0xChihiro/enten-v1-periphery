@@ -4,6 +4,8 @@ pragma solidity 0.8.34;
 import {BorrowPolicy} from "../src/policies/BorrowPolicy.sol";
 import {Borrower} from "../src/modules/BRWR/Borrower.sol";
 import {IBorrower} from "../src/interfaces/IBorrower.sol";
+import {backingPerToken} from "../src/Utils.sol";
+import {IToken} from "enten-v1/interfaces/IToken.sol";
 import {Controller} from "enten-v1/Controller.sol";
 import {Token} from "enten-v1/Token.sol";
 import {Kernel} from "enten-v1/Kernel.sol";
@@ -28,6 +30,13 @@ contract BorrowerInvariantHandler is Test {
 
     address[] public users;
     uint256 public successfulCalls;
+
+    uint256 internal constant WAD = 1e18;
+
+    /// @notice Highest debt-array length ever observed per user. The debt array is append-only in the
+    ///         module (full repay zeroes an entry but never removes it), so the live length must always
+    ///         equal this high-water mark; a shrink would indicate accounting corruption.
+    mapping(address => uint256) public debtLenHighWater;
 
     constructor(
         BorrowPolicy policy_,
@@ -84,6 +93,7 @@ contract BorrowerInvariantHandler is Test {
         try policy.borrow(_oneReceipt(borrowAsset, amount)) {
             ++successfulCalls;
         } catch {}
+        _trackDebtLen(user);
     }
 
     function borrowMax(uint8 userSeed) external {
@@ -93,6 +103,7 @@ contract BorrowerInvariantHandler is Test {
         try policy.borrowMax() {
             ++successfulCalls;
         } catch {}
+        _trackDebtLen(user);
     }
 
     function repay(uint8 userSeed, uint8 assetSeed, uint96 amountSeed) external {
@@ -131,6 +142,48 @@ contract BorrowerInvariantHandler is Test {
         vm.stopPrank();
     }
 
+    function depositAndBorrow(uint8 userSeed, uint8 assetSeed, uint96 collateralSeed, uint96 borrowSeed) external {
+        address user = _user(userSeed);
+        address borrowAsset = _asset(assetSeed);
+        uint256 collateralAmount = bound(uint256(collateralSeed), 0, token.balanceOf(user));
+        if (collateralAmount == 0) return;
+
+        // Bound the borrow to the capacity the position will have *after* the collateral lands, plus one
+        // wei, so the combined action exercises both the success path (borrowing against just-deposited
+        // collateral) and the revert path (one wei over the limit).
+        uint256 capacity = _capacityAfterDeposit(user, borrowAsset, collateralAmount);
+        uint256 amount = bound(uint256(borrowSeed), 0, capacity + 1);
+
+        vm.startPrank(user);
+        token.approve(address(policy.CONTROLLER().VAULT()), collateralAmount);
+        try policy.depositAndBorrow(collateralAmount, _oneReceipt(borrowAsset, amount)) {
+            ++successfulCalls;
+        } catch {}
+        vm.stopPrank();
+        _trackDebtLen(user);
+    }
+
+    function repayAndWithdraw(uint8 userSeed, uint8 assetSeed, uint96 repaySeed, uint96 withdrawSeed) external {
+        address user = _user(userSeed);
+        ERC20Mock repayAsset = _erc20Asset(assetSeed);
+
+        uint256 debt = policy.currentDebtForAsset(user, address(repayAsset));
+        uint256 balance = repayAsset.balanceOf(user);
+        uint256 repayUpper = debt < balance ? debt : balance;
+        uint256 repayAmount = bound(uint256(repaySeed), 0, repayUpper);
+
+        uint256 collateral = borrower.positions(user).collateral;
+        uint256 withdrawAmount = bound(uint256(withdrawSeed), 0, collateral);
+        if (repayAmount == 0 && withdrawAmount == 0) return;
+
+        vm.startPrank(user);
+        if (repayAmount != 0) repayAsset.approve(address(policy.CONTROLLER().VAULT()), repayAmount);
+        try policy.repayAndWithdraw(_oneReceipt(address(repayAsset), repayAmount), withdrawAmount) {
+            ++successfulCalls;
+        } catch {}
+        vm.stopPrank();
+    }
+
     function trackedUsers() external view returns (address[] memory) {
         return users;
     }
@@ -151,6 +204,34 @@ contract BorrowerInvariantHandler is Test {
 
     function _erc20Asset(uint8 assetSeed) internal view returns (ERC20Mock) {
         return assetSeed % 2 == 0 ? asset : secondAsset;
+    }
+
+    function _trackDebtLen(address user) internal {
+        uint256 len = borrower.positions(user).debt.length;
+        if (len > debtLenHighWater[user]) debtLenHighWater[user] = len;
+    }
+
+    /// @dev Spare borrowing capacity for `borrowAsset` assuming `addedCollateral` is deposited first.
+    function _capacityAfterDeposit(address user, address borrowAsset, uint256 addedCollateral)
+        internal
+        view
+        returns (uint256)
+    {
+        uint256 collateral = borrower.positions(user).collateral + addedCollateral;
+        IController.Backing[] memory backings = backingPerToken(policy.KERNEL(), IToken(address(token)));
+
+        for (uint256 i; i < backings.length;) {
+            if (backings[i].asset == borrowAsset) {
+                uint256 limit = Math.mulDiv(collateral, backings[i].backingPerToken, WAD);
+                uint256 currentDebt = policy.currentDebtForAsset(user, borrowAsset);
+                return limit > currentDebt ? limit - currentDebt : 0;
+            }
+            unchecked {
+                ++i;
+            }
+        }
+
+        return 0;
     }
 
     function _oneReceipt(address receiptAsset, uint256 amount)
@@ -195,7 +276,7 @@ contract BorrowerInvariantTest is StdInvariant, Test {
         token = new Token("Enten", "ENTEN", predictedController, user, INITIAL_SUPPLY, type(uint256).max);
         controller = new Controller(admin, protocolCollector, predictedKernel, predictedVault, predictedToken, 0);
 
-        borrower = new Borrower(address(controller), address(kernel));
+        borrower = new Borrower(address(controller));
         policy = new BorrowPolicy(address(controller));
         asset = new ERC20Mock();
         secondAsset = new ERC20Mock();
@@ -290,6 +371,75 @@ contract BorrowerInvariantTest is StdInvariant, Test {
                     }
                 }
                 assertTrue(knownAsset, "borrowable returned unknown asset");
+                unchecked {
+                    ++j;
+                }
+            }
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @notice Locked collateral makes borrowed liquidity neutral to everyone else's redemptions.
+    /// @dev    Borrowing moves backing from the Redeem bucket to the Borrow bucket, but it also locks
+    ///         collateral TOKEN that can no longer be redeemed (redemption burns from the caller's own
+    ///         balance) while still counting in effectiveSupply. As a result the Redeem bucket can always
+    ///         cover the *free* (non-collateral) holders. This is the on-chain form of the algebraic
+    ///         identity: the module's per-user borrow check `debt <= collateral*bpt` is exactly equivalent
+    ///         to `BACKING * effectiveSupply >= freeSupply * (BACKING + BORROWED)`.
+    function invariant_freeHoldersAlwaysRedeemable() public view {
+        uint256 effectiveSupply = token.totalSupply() - uint256(kernel.viewData(Slots.TEAM_LOCKED_TOKENS_SLOT));
+        uint256 totalCollateral = _bucketValue(IVault.Bucket.Collateral, address(token));
+        uint256 freeSupply = effectiveSupply > totalCollateral ? effectiveSupply - totalCollateral : 0;
+
+        address[] memory assets = handler.trackedAssets();
+        for (uint256 i; i < assets.length;) {
+            uint256 backing = _bucketValue(IVault.Bucket.Redeem, assets[i]);
+            uint256 borrowed = _bucketValue(IVault.Bucket.Borrow, assets[i]);
+            assertGe(
+                backing * effectiveSupply, freeSupply * (backing + borrowed), "redeem bucket cannot cover free holders"
+            );
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @notice The global collateral bucket equals the summed per-user collateral and the vault's token
+    ///         balance. The collateral-side analog of invariant_globalBorrowBucketMatchesTrackedUserDebt.
+    function invariant_collateralBucketMatchesTrackedUserCollateral() public view {
+        address[] memory users = handler.trackedUsers();
+        uint256 summed;
+        for (uint256 i; i < users.length;) {
+            summed += borrower.positions(users[i]).collateral;
+            unchecked {
+                ++i;
+            }
+        }
+
+        uint256 bucket = _bucketValue(IVault.Bucket.Collateral, address(token));
+        assertEq(bucket, summed, "collateral bucket != summed user collateral");
+        // TOKEN only ever enters the vault as collateral here, so the raw balance must match the bucket.
+        assertEq(token.balanceOf(address(vault)), bucket, "vault token balance != collateral bucket");
+    }
+
+    /// @notice Debt arrays stay structurally sound: the module consolidates per asset (no duplicates) and
+    ///         never removes an entry, so the live length must equal the per-user high-water mark.
+    function invariant_debtArrayStructuralIntegrity() public view {
+        address[] memory users = handler.trackedUsers();
+        for (uint256 i; i < users.length;) {
+            IBorrower.UserPosition memory position = borrower.positions(users[i]);
+
+            assertEq(position.debt.length, handler.debtLenHighWater(users[i]), "debt array length shrank");
+
+            for (uint256 j; j < position.debt.length;) {
+                for (uint256 k = j + 1; k < position.debt.length;) {
+                    assertTrue(position.debt[j].asset != position.debt[k].asset, "duplicate debt asset entry");
+                    unchecked {
+                        ++k;
+                    }
+                }
                 unchecked {
                     ++j;
                 }

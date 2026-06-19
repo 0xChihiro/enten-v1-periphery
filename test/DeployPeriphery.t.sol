@@ -183,11 +183,7 @@ contract DeployPeripheryTest is Test {
             ? (Currency.wrap(enten), Currency.wrap(address(usdm)))
             : (Currency.wrap(address(usdm)), Currency.wrap(enten));
         PoolKey memory key = PoolKey({
-            currency0: c0,
-            currency1: c1,
-            fee: POOL_FEE,
-            tickSpacing: POOL_TICK_SPACING,
-            hooks: IHooks(address(d.hook))
+            currency0: c0, currency1: c1, fee: POOL_FEE, tickSpacing: POOL_TICK_SPACING, hooks: IHooks(address(d.hook))
         });
         (uint160 sqrtPriceX96,,, uint24 lpFee) = poolManager.getSlot0(key.toId());
 

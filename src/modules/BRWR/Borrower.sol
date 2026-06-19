@@ -16,8 +16,8 @@ contract Borrower is IBorrower, BRWRv1 {
     IKernel public immutable KERNEL;
     IToken public immutable TOKEN;
 
-    constructor(address controller, address kernel) BRWRv1(controller) {
-        KERNEL = IKernel(kernel);
+    constructor(address controller) BRWRv1(controller) {
+        KERNEL = IController(controller).KERNEL();
         address token = address(IController(controller).TOKEN());
         if (token == address(0)) revert Borrower__TokenZeroAddress();
         TOKEN = IToken(token);

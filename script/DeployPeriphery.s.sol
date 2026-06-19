@@ -158,10 +158,7 @@ contract DeployPeripheryScript is Script {
 
     /// @dev Steps 1-2: deploy the modules and policies (the hook via a mined CREATE2 salt). Split out of
     ///      `run` to keep each frame's local count under the stack-too-deep limit.
-    function _deploy(IController controller, address admin, address backingAsset)
-        internal
-        returns (Deployed memory d)
-    {
+    function _deploy(IController controller, address admin, address backingAsset) internal returns (Deployed memory d) {
         address controllerAddr = address(controller);
         address poolManager = vm.envAddress("POOL_MANAGER_ADDRESS");
         address entenToken = address(controller.TOKEN());
@@ -224,7 +221,9 @@ contract DeployPeripheryScript is Script {
         // 8. Open the presale: starts the decay/duration clock and validates START_PRICE > the live floor.
         //    Requires effectiveSupply > 0 (genesis seed already minted) and backing seeded above. See
         //    DEPLOYMENT_NOTES.md if this reverts on a fully team-locked genesis.
-        require(effectiveSupply(controller.KERNEL(), controller.TOKEN()) > 0, "effectiveSupply == 0: seed genesis first");
+        require(
+            effectiveSupply(controller.KERNEL(), controller.TOKEN()) > 0, "effectiveSupply == 0: seed genesis first"
+        );
         // d.presale.open();
     }
 
@@ -260,6 +259,7 @@ library HookMiner {
     }
 
     function _computeAddress(address deployer, uint256 salt, bytes32 initCodeHash) private pure returns (address) {
-        return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), deployer, bytes32(salt), initCodeHash)))));
+        return
+            address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), deployer, bytes32(salt), initCodeHash)))));
     }
 }

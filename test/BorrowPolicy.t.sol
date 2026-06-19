@@ -47,7 +47,7 @@ contract BorrowPolicyTest is Test {
         token = new Token("Enten", "ENTEN", predictedController, user, INITIAL_SUPPLY, type(uint256).max);
         controller = new Controller(admin, protocolCollector, predictedKernel, predictedVault, predictedToken, 0);
 
-        borrower = new Borrower(address(controller), address(kernel));
+        borrower = new Borrower(address(controller));
         policy = new BorrowPolicy(address(controller));
         asset = new ERC20Mock();
         secondAsset = new ERC20Mock();
@@ -605,6 +605,51 @@ contract BorrowPolicyTest is Test {
         assertEq(position.debt.length, 1);
         assertEq(position.debt[0].asset, address(asset));
         assertEq(position.debt[0].amount, 49 ether);
+    }
+
+    /// @notice Documents M-2: while settlements are paused, a user cannot repay or withdraw — even when the
+    ///         position is over-collateralised — so collateral is trapped for the duration of the pause.
+    function testRepayAndWithdrawRevertWhileSettlementsPaused() public {
+        _setAssets(address(asset), address(secondAsset));
+        _seedBacking(asset, INITIAL_SUPPLY);
+        _depositCollateral(100 ether);
+        _borrow(_oneReceipt(address(asset), 40 ether));
+        _approveAsset(asset, 40 ether);
+
+        vm.prank(admin);
+        controller.setSettlementsPaused(true);
+
+        vm.prank(user);
+        vm.expectRevert(IController.Controller__SettlementsPaused.selector);
+        policy.repay(_oneReceipt(address(asset), 10 ether));
+
+        vm.prank(user);
+        vm.expectRevert(IController.Controller__SettlementsPaused.selector);
+        policy.withdraw(1 ether);
+
+        IBorrower.UserPosition memory position = borrower.positions(user);
+        assertEq(position.collateral, 100 ether);
+        assertEq(position.debt[0].amount, 40 ether);
+    }
+
+    /// @notice Documents M-2: disabling the borrower module blocks repayment the same way.
+    function testRepayRevertsWhileBorrowerModuleDisabled() public {
+        _setAssets(address(asset), address(secondAsset));
+        _seedBacking(asset, INITIAL_SUPPLY);
+        _depositCollateral(100 ether);
+        _borrow(_oneReceipt(address(asset), 40 ether));
+        _approveAsset(asset, 40 ether);
+
+        vm.prank(admin);
+        controller.setModuleDisabled(Keycode.wrap("BRRWR"), true);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(IController.Controller__ModuleDisabled.selector, Keycode.wrap("BRRWR")));
+        policy.repay(_oneReceipt(address(asset), 10 ether));
+
+        IBorrower.UserPosition memory position = borrower.positions(user);
+        assertEq(position.collateral, 100 ether);
+        assertEq(position.debt[0].amount, 40 ether);
     }
 
     function _depositCollateral(uint256 amount) internal {

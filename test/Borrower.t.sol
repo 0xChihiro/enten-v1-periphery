@@ -43,7 +43,7 @@ contract BorrowerTestPolicy is Policy {
 }
 
 contract BorrowerHarness is Borrower {
-    constructor(address controller, address kernel) Borrower(controller, kernel) {}
+    constructor(address controller) Borrower(controller) {}
 
     function buildUpdatedPosition(
         IBorrower.Action action,
@@ -101,7 +101,7 @@ contract BorrowerTest is Test {
         token = new Token("Enten", "ENTEN", predictedController, user, INITIAL_SUPPLY, type(uint256).max);
         controller = new Controller(admin, protocolCollector, predictedKernel, predictedVault, predictedToken, 0);
 
-        borrower = new BorrowerHarness(address(controller), address(kernel));
+        borrower = new BorrowerHarness(address(controller));
         policy = new BorrowerTestPolicy(address(controller));
         asset = new ERC20Mock();
         secondAsset = new ERC20Mock();
