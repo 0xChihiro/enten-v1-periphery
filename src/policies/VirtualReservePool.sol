@@ -57,6 +57,13 @@ import {wadExp} from "solmate/src/utils/SignedWadMath.sol";
  *         through that waterfall so the backing invariant holds. The premium leg is surplus over the required
  *         backing floor and is routed through the normal payment fee waterfall.
  *
+ *         BACKING ASSET ELIGIBILITY. Only standard, non-rebasing, non-fee-on-transfer ERC20s may be
+ *         registered as backing. The floor/backing accounting assumes the vault receives exactly
+ *         `receipt.amount` of each asset on a buy and pays exactly the redeem-bucket amount on a sell. A
+ *         fee-on-transfer or rebasing/elastic-supply asset would desync the recorded backing from the
+ *         vault's real balance and break the floor and redemption math. This is a registration-time
+ *         eligibility assumption shared with the rest of the system, not something this contract enforces.
+ *
  * @dev    Every registered backing asset MUST have a configured reserve ({setReserve}) before it can be
  *         bought against; a buy reverts if any registered asset is unconfigured or unseeded. Adding a
  *         backing asset via the Gateway without configuring it here therefore pauses buys until the admin
@@ -317,24 +324,34 @@ contract VirtualReservePool is ReentrancyGuard, AccessControl, Policy {
     }
 
     /// @notice Anchor the decay clock to now and go live. One-time, admin-only.
-    /// @dev    Requires at least one registered backing asset and that *every* registered asset already has
-    ///         a configured reserve, so a successful call proves the pool is fully provisioned across all
-    ///         assets. Each configured asset's decay clock is anchored to this timestamp.
+    /// @dev    Requires token supply to already exist with nonzero backing for *every* registered asset, and
+    ///         that every registered asset has a configured reserve — so a successful call proves the pool is
+    ///         fully provisioned and immediately buyable across all assets. Opening against unseeded backing
+    ///         is rejected so the premium decay clock cannot start before buys are actually possible.
+    ///         Each configured asset's decay clock is anchored to this timestamp.
     function open() external onlyRole(OPENER_ROLE) {
         if (startTime != 0) revert VirtualReservePool__AlreadyOpen();
 
-        address[] memory assetList = assets(KERNEL);
-        if (assetList.length == 0) revert VirtualReservePool__EmptyAssets();
+        // Iterate live backing (not the raw asset registry) so opening requires nonzero seeded backing for
+        // every asset. backingPerToken returns an empty list while effective supply is zero, which also
+        // blocks opening before any token exists — exactly the state in which buys would revert anyway.
+        IController.Backing[] memory backings = backingPerToken(KERNEL, TOKEN);
+        if (backings.length == 0) revert VirtualReservePool__EmptyAssets();
 
-        startTime = block.timestamp;
-        for (uint256 i = 0; i < assetList.length;) {
-            Reserve storage r = reserves[assetList[i]];
-            if (!r.configured) revert VirtualReservePool__NotConfigured(assetList[i]);
+        for (uint256 i = 0; i < backings.length;) {
+            address asset = backings[i].asset;
+            if (backings[i].backingPerToken == 0) revert VirtualReservePool__UnseededAsset(asset);
+
+            Reserve storage r = reserves[asset];
+            if (!r.configured) revert VirtualReservePool__NotConfigured(asset);
+
             r.lastUpdate = block.timestamp;
             unchecked {
                 ++i;
             }
         }
+
+        startTime = block.timestamp;
 
         emit VirtualReservePool__Open(block.timestamp);
     }
@@ -467,19 +484,28 @@ contract VirtualReservePool is ReentrancyGuard, AccessControl, Policy {
     }
 
     /// @notice Current spot price per token for one asset: backing floor plus its decayed premium.
+    /// @dev    Reverts for an unconfigured (or unseeded/unregistered) asset, so a returned price is always a
+    ///         live, executable buy price that matches {quote}/{buy}. Use {minimumPrice} for the bare floor.
     function price(address asset) public view returns (uint256) {
         uint256 floor = minimumPrice(asset);
-        return floor + _premium(reserves[asset], floor);
+        Reserve storage r = reserves[asset];
+        if (!r.configured) revert VirtualReservePool__NotConfigured(asset);
+        return floor + _premium(r, floor);
     }
 
     /// @notice Spot price per token for every registered asset, as Backing entries (kernel order).
+    /// @dev    Reverts if any registered asset is unseeded or unconfigured, mirroring {buy}: while any asset
+    ///         is unconfigured the whole pool's buy is paused, so this surface refuses to advertise a price
+    ///         rather than show a buyable-looking floor for an asset that cannot be bought.
     function getPrices() public view returns (IController.Backing[] memory prices) {
         prices = backingPerToken(KERNEL, TOKEN);
         for (uint256 i = 0; i < prices.length;) {
             address asset = prices[i].asset;
             if (prices[i].backingPerToken == 0) revert VirtualReservePool__UnseededAsset(asset);
+            Reserve storage r = reserves[asset];
+            if (!r.configured) revert VirtualReservePool__NotConfigured(asset);
             uint256 floor = _grossUpForFees(prices[i].backingPerToken + 1);
-            prices[i].backingPerToken = floor + _premium(reserves[asset], floor);
+            prices[i].backingPerToken = floor + _premium(r, floor);
             unchecked {
                 ++i;
             }

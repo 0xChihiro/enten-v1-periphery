@@ -182,7 +182,9 @@ contract VirtualReservePoolInvariantTest is StdInvariant, Test {
         assetB = new ERC20Mock();
         minter = new Minter(address(controller));
         burner = new BurnerModule(address(controller), address(kernel), address(assetA), 2);
-        pool = new VirtualReservePool(address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS);
+        pool = new VirtualReservePool(
+            address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS
+        );
 
         _setAssets(address(assetA), address(assetB));
         _seedBacking(assetA, BACKING_A);

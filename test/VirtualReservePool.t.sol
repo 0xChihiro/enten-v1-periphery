@@ -84,7 +84,9 @@ contract VirtualReservePoolTest is Test {
         assetB = new ERC20Mock();
         minter = new Minter(address(controller));
         burner = new BurnerModule(address(controller), address(kernel), address(assetA), 2);
-        pool = new VirtualReservePool(address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS);
+        pool = new VirtualReservePool(
+            address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS
+        );
 
         _setAssets(address(assetA), address(assetB));
         _seedBacking(assetA, BACKING_A);
@@ -104,8 +106,9 @@ contract VirtualReservePoolTest is Test {
     /*----------  CONSTRUCTION & WIRING  --------------------------------*/
 
     function testConstructorStoresInitialState() public {
-        VirtualReservePool fresh =
-            new VirtualReservePool(address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS);
+        VirtualReservePool fresh = new VirtualReservePool(
+            address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS
+        );
         assertEq(address(fresh.KERNEL()), address(kernel));
         assertEq(address(fresh.TOKEN()), address(token));
         assertTrue(fresh.hasRole(fresh.DEFAULT_ADMIN_ROLE(), admin));
@@ -121,22 +124,32 @@ contract VirtualReservePoolTest is Test {
 
     function testConstructorRejectsInvalidParameters() public {
         vm.expectRevert(VirtualReservePool.VirtualReservePool__InvalidConfig.selector);
-        new VirtualReservePool(address(controller), address(0), HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS);
+        new VirtualReservePool(
+            address(controller), address(0), HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS
+        );
 
         vm.expectRevert(VirtualReservePool.VirtualReservePool__InvalidConfig.selector);
-        new VirtualReservePool(address(controller), admin, 1 hours - 1, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS);
+        new VirtualReservePool(
+            address(controller), admin, 1 hours - 1, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS
+        );
 
         vm.expectRevert(VirtualReservePool.VirtualReservePool__InvalidConfig.selector);
-        new VirtualReservePool(address(controller), admin, 3650 days + 1, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS);
+        new VirtualReservePool(
+            address(controller), admin, 3650 days + 1, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS
+        );
 
         vm.expectRevert(VirtualReservePool.VirtualReservePool__InvalidConfig.selector);
         new VirtualReservePool(address(controller), admin, HALF_LIFE, BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS);
 
         vm.expectRevert(VirtualReservePool.VirtualReservePool__InvalidConfig.selector);
-        new VirtualReservePool(address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_THRESHOLD_BPS, MIN_PREMIUM_BPS);
+        new VirtualReservePool(
+            address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_THRESHOLD_BPS, MIN_PREMIUM_BPS
+        );
 
         vm.expectRevert(VirtualReservePool.VirtualReservePool__InvalidConfig.selector);
-        new VirtualReservePool(address(controller), admin, HALF_LIFE, RESET_TARGET_BPS, RESET_THRESHOLD_BPS, MIN_PREMIUM_BPS);
+        new VirtualReservePool(
+            address(controller), admin, HALF_LIFE, RESET_TARGET_BPS, RESET_THRESHOLD_BPS, MIN_PREMIUM_BPS
+        );
 
         // minPremiumBps must be in (0, BPS).
         vm.expectRevert(VirtualReservePool.VirtualReservePool__InvalidConfig.selector);
@@ -387,8 +400,9 @@ contract VirtualReservePoolTest is Test {
 
     function testOpenRevertsWhenAnAssetIsUnconfigured() public {
         // Fresh pool: configure only A, leave B unconfigured.
-        VirtualReservePool fresh =
-            new VirtualReservePool(address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS);
+        VirtualReservePool fresh = new VirtualReservePool(
+            address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS
+        );
         vm.startPrank(admin);
         controller.executeAction(Actions.ActivatePolicy, address(fresh));
         fresh.setReserve(address(assetA), RESERVE_A, START_PREMIUM_A);
@@ -397,6 +411,56 @@ contract VirtualReservePoolTest is Test {
         );
         fresh.open();
         vm.stopPrank();
+    }
+
+    function testOpenRevertsWhenAnAssetIsUnseeded() public {
+        // Register a third asset, fully configured, but with NO backing seeded. open() must reject it so the
+        // premium decay clock never starts while a registered asset is still unbuyable.
+        ERC20Mock assetC = new ERC20Mock();
+        _setAssets3(address(assetA), address(assetB), address(assetC));
+
+        VirtualReservePool fresh = new VirtualReservePool(
+            address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS
+        );
+        vm.startPrank(admin);
+        controller.executeAction(Actions.ActivatePolicy, address(fresh));
+        fresh.setReserve(address(assetA), RESERVE_A, START_PREMIUM_A);
+        fresh.setReserve(address(assetB), RESERVE_B, START_PREMIUM_B);
+        fresh.setReserve(address(assetC), RESERVE_A, 1); // unseeded: low premium accepted, no floor yet
+        vm.expectRevert(
+            abi.encodeWithSelector(VirtualReservePool.VirtualReservePool__UnseededAsset.selector, address(assetC))
+        );
+        fresh.open();
+        vm.stopPrank();
+
+        // The failed open left the pool closed; nothing was anchored.
+        assertEq(fresh.startTime(), 0);
+    }
+
+    function testOpenSucceedsOnceEveryAssetIsSeeded() public {
+        // Same three assets, but now seed C's backing first: open() must succeed and anchor all three clocks.
+        ERC20Mock assetC = new ERC20Mock();
+        _setAssets3(address(assetA), address(assetB), address(assetC));
+        _seedBacking(assetC, BACKING_A);
+
+        VirtualReservePool fresh = new VirtualReservePool(
+            address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS
+        );
+        vm.startPrank(admin);
+        controller.executeAction(Actions.ActivatePolicy, address(fresh));
+        fresh.setReserve(address(assetA), RESERVE_A, START_PREMIUM_A);
+        fresh.setReserve(address(assetB), RESERVE_B, START_PREMIUM_B);
+        fresh.setReserve(address(assetC), RESERVE_A, START_PREMIUM_A);
+        fresh.open();
+        vm.stopPrank();
+
+        assertEq(fresh.startTime(), block.timestamp);
+        (,,, uint256 lastA,,,) = fresh.reserves(address(assetA));
+        (,,, uint256 lastB,,,) = fresh.reserves(address(assetB));
+        (,,, uint256 lastC,,,) = fresh.reserves(address(assetC));
+        assertEq(lastA, block.timestamp);
+        assertEq(lastB, block.timestamp);
+        assertEq(lastC, block.timestamp);
     }
 
     /*----------  PRICING  --------------------------------------------*/
@@ -424,6 +488,34 @@ contract VirtualReservePoolTest is Test {
         ERC20Mock rogue = new ERC20Mock();
         vm.expectRevert(VirtualReservePool.VirtualReservePool__UnsupportedBackingAsset.selector);
         pool.minimumPrice(address(rogue));
+    }
+
+    function testPriceRevertsForSeededButUnconfiguredAsset() public {
+        // Register and seed a third asset but do NOT configure it: price() must revert NotConfigured, matching
+        // quote()/buy(), instead of advertising a bare floor for an asset that cannot be bought.
+        ERC20Mock assetC = new ERC20Mock();
+        _setAssets3(address(assetA), address(assetB), address(assetC));
+        _seedBacking(assetC, 3_000 ether);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(VirtualReservePool.VirtualReservePool__NotConfigured.selector, address(assetC))
+        );
+        pool.price(address(assetC));
+        // The bare floor remains readable via the config-independent helper.
+        assertEq(pool.minimumPrice(address(assetC)), _grossedFloor(3 ether));
+    }
+
+    function testGetPricesRevertsWhileAnyAssetIsUnconfigured() public {
+        // A seeded-but-unconfigured asset pauses the whole pool's buys; getPrices() refuses to quote rather
+        // than show a buyable-looking floor for it.
+        ERC20Mock assetC = new ERC20Mock();
+        _setAssets3(address(assetA), address(assetB), address(assetC));
+        _seedBacking(assetC, 3_000 ether);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(VirtualReservePool.VirtualReservePool__NotConfigured.selector, address(assetC))
+        );
+        pool.getPrices();
     }
 
     /// @notice Per-asset steepness: the steep curve (B) charges a higher premium-per-token than the shallow
@@ -613,12 +705,161 @@ contract VirtualReservePoolTest is Test {
     }
 
     function testBuyRevertsBeforeOpen() public {
-        VirtualReservePool fresh =
-            new VirtualReservePool(address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS);
+        VirtualReservePool fresh = new VirtualReservePool(
+            address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS
+        );
         IController.Receipt[] memory max = _maxPayments(type(uint256).max, type(uint256).max);
         vm.expectRevert(VirtualReservePool.VirtualReservePool__NotOpen.selector);
         vm.prank(buyer);
         fresh.buy(1 ether, max, block.timestamp);
+    }
+
+    function testBuyRevertsForUnseededRegisteredAsset() public {
+        // Register a third backing asset with no backing seeded. It joins the pay-in-all set with bpt 0, so
+        // every buy reverts UnseededAsset until backing is provided.
+        ERC20Mock assetC = new ERC20Mock();
+        _setAssets3(address(assetA), address(assetB), address(assetC));
+
+        IController.Receipt[] memory max = new IController.Receipt[](3);
+        max[0] = IController.Receipt({asset: address(assetA), amount: type(uint256).max});
+        max[1] = IController.Receipt({asset: address(assetB), amount: type(uint256).max});
+        max[2] = IController.Receipt({asset: address(assetC), amount: type(uint256).max});
+
+        vm.expectRevert(
+            abi.encodeWithSelector(VirtualReservePool.VirtualReservePool__UnseededAsset.selector, address(assetC))
+        );
+        vm.prank(buyer);
+        pool.buy(1 ether, max, block.timestamp);
+    }
+
+    function testQuoteRevertsForZeroAmount() public {
+        vm.expectRevert(VirtualReservePool.VirtualReservePool__InvalidMintAmount.selector);
+        pool.quote(0);
+    }
+
+    function testGetPricesRevertsForUnseededAsset() public {
+        ERC20Mock assetC = new ERC20Mock();
+        _setAssets3(address(assetA), address(assetB), address(assetC)); // registered, never seeded
+        vm.expectRevert(
+            abi.encodeWithSelector(VirtualReservePool.VirtualReservePool__UnseededAsset.selector, address(assetC))
+        );
+        pool.getPrices();
+    }
+
+    function testOpenRevertsWithEmptyAssetRegistry() public {
+        _setAssetsRaw(new address[](0)); // empty the kernel asset registry
+        VirtualReservePool fresh = new VirtualReservePool(
+            address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS
+        );
+        vm.startPrank(admin);
+        controller.executeAction(Actions.ActivatePolicy, address(fresh));
+        vm.expectRevert(VirtualReservePool.VirtualReservePool__EmptyAssets.selector);
+        fresh.open();
+        vm.stopPrank();
+    }
+
+    /*----------  RESET / CURVE EDGE CASES  ---------------------------*/
+
+    function testResetTriggersExactlyAtThresholdBoundary() public {
+        // A buy landing post-buy consumed EXACTLY on thresholdConsumed must still reset (the guard is >=, not >).
+        uint256 thresholdConsumed = RESERVE_B * RESET_THRESHOLD_BPS / BPS; // 160 ether
+        uint256 targetConsumed = RESERVE_B * RESET_TARGET_BPS / BPS; // 40 ether
+
+        // Fund first (minting/approval emit their own events), then assert the reset event on the buy itself.
+        (IController.Receipt[] memory q,,) = pool.quote(thresholdConsumed);
+        _fundAndApprove(buyer, address(assetA), q[0].amount);
+        _fundAndApprove(buyer, address(assetB), q[1].amount);
+
+        vm.expectEmit(true, false, false, true, address(pool));
+        emit VirtualReservePool__ReserveReset(address(assetB), thresholdConsumed, targetConsumed, thresholdConsumed);
+        vm.prank(buyer);
+        pool.buy(thresholdConsumed, q, block.timestamp);
+
+        assertEq(pool.reserveOf(address(assetB)), RESERVE_B - targetConsumed, "B reset at exact boundary");
+        (,,,, uint256 mintedAtB,,) = pool.reserves(address(assetB));
+        assertEq(mintedAtB, thresholdConsumed - targetConsumed);
+    }
+
+    function testBuyResetsBothAssetsInOneBuy() public {
+        // Deepen B to A's depth so a single buy can cross BOTH 80% thresholds at once (previously only B ever
+        // reset, since B exhausted before A's threshold was reachable).
+        vm.prank(admin);
+        pool.deepenReserve(address(assetB), RESERVE_A); // B: 200 -> 1000 == A
+
+        uint256 amount = 850 ether; // 85% of 1000 on both; below 1000 so neither asset exhausts
+        _executeBuy(amount);
+
+        uint256 targetConsumed = RESERVE_A * RESET_TARGET_BPS / BPS; // 200 ether
+        assertEq(pool.reserveOf(address(assetA)), RESERVE_A - targetConsumed, "A reset to target segment");
+        assertEq(pool.reserveOf(address(assetB)), RESERVE_A - targetConsumed, "B reset to target segment");
+        (,,,, uint256 mintedAtA,,) = pool.reserves(address(assetA));
+        (,,,, uint256 mintedAtB,,) = pool.reserves(address(assetB));
+        assertEq(mintedAtA, amount - targetConsumed, "A anchor moved");
+        assertEq(mintedAtB, amount - targetConsumed, "B anchor moved");
+    }
+
+    function testManyConsecutiveResetCyclesRatchetPremiumWithoutOverflow() public {
+        // First buy crosses B's threshold and resets it to the 20% segment.
+        _executeBuy(170 ether);
+        uint256 prevPremium = _premiumOf(address(assetB));
+
+        // Each equal buy walks B from 20% back to 80% and resets again. Same block => no decay, so the premium
+        // can only ratchet UP via the constant-product refill across cycles; none of the quote math overflows.
+        for (uint256 i = 0; i < 8; ++i) {
+            _executeBuy(120 ether);
+            uint256 premium = _premiumOf(address(assetB));
+            assertGe(premium, prevPremium, "premium ratchets up across reset cycles");
+            prevPremium = premium;
+        }
+
+        // Cumulative issuance far exceeds one curve depth: continuous issuance via rolling resets.
+        assertEq(pool.totalMinted(), 170 ether + 8 * 120 ether);
+        assertGt(pool.totalMinted(), RESERVE_B * 5);
+    }
+
+    function testNearExhaustionBuyLeavesOneTokenAndSpikesPremiumGracefully() public {
+        // Buy all but one token of steep asset B's reserve: nextTokenReserve == 1, the extreme vertical tail.
+        uint256 amount = RESERVE_B - 1;
+        (,, uint256 premiumBefore,,,,) = pool.reserves(address(assetB));
+
+        _executeBuy(amount); // must settle without overflow/revert
+
+        assertEq(pool.totalMinted(), amount);
+        // The tail spiked the stored premium far above its opening value; the buy still settled cleanly and B
+        // then reset (consumed >= threshold), carrying the spiked anchor forward (heals only via decay).
+        (,, uint256 premiumAfter,,,,) = pool.reserves(address(assetB));
+        assertGt(premiumAfter, premiumBefore);
+        assertGt(premiumAfter, START_PREMIUM_B);
+    }
+
+    function testDustBuyOfOneWeiSettlesAndAddsBacking() public {
+        uint256 redeemABefore = _bucketValue(IVault.Bucket.Redeem, address(assetA));
+        uint256 redeemBBefore = _bucketValue(IVault.Bucket.Redeem, address(assetB));
+
+        // Settlement runs Dispatch._validateBacking; a 1-wei buy that under-paid backing would revert there.
+        // Success proves the ceil-grossed floor leg defends the backing invariant even at the smallest scale.
+        _executeBuy(1);
+
+        assertEq(pool.totalMinted(), 1);
+        assertEq(token.balanceOf(buyer), 1);
+        assertGe(_bucketValue(IVault.Bucket.Redeem, address(assetA)), redeemABefore, "A backing only grows");
+        assertGe(_bucketValue(IVault.Bucket.Redeem, address(assetB)), redeemBBefore, "B backing only grows");
+    }
+
+    function testDeepenAfterResetKeepsLiveReserveAndDoesNotRetriggerReset() public {
+        // Cross B's threshold so it resets to the 20% segment, then deepen: live reserve grows by exactly the
+        // added depth and the reset is NOT re-evaluated by deepen (I-05).
+        _executeBuy(170 ether);
+        uint256 liveBefore = pool.reserveOf(address(assetB));
+        (,,,, uint256 mintedAtBefore,,) = pool.reserves(address(assetB));
+
+        uint256 newVtr = RESERVE_B * 3;
+        vm.prank(admin);
+        pool.deepenReserve(address(assetB), newVtr);
+
+        assertEq(pool.reserveOf(address(assetB)), liveBefore + (newVtr - RESERVE_B), "live reserve += added depth");
+        (,,,, uint256 mintedAtAfter,,) = pool.reserves(address(assetB));
+        assertEq(mintedAtAfter, mintedAtBefore, "deepen must not move the curve anchor / re-reset");
     }
 
     /*----------  SELL / REDEEM  --------------------------------------*/
@@ -679,8 +920,9 @@ contract VirtualReservePoolTest is Test {
 
     function testSellWorksBeforeOpen() public {
         // Redemption is independent of the pool being opened.
-        VirtualReservePool fresh =
-            new VirtualReservePool(address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS);
+        VirtualReservePool fresh = new VirtualReservePool(
+            address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS
+        );
         vm.prank(admin);
         controller.executeAction(Actions.ActivatePolicy, address(fresh));
         assertEq(fresh.startTime(), 0);
@@ -1049,8 +1291,9 @@ contract VirtualReservePoolTest is Test {
         pool.grantRole(openerRole, newOpener);
         assertTrue(pool.hasRole(openerRole, newOpener));
 
-        VirtualReservePool fresh =
-            new VirtualReservePool(address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS);
+        VirtualReservePool fresh = new VirtualReservePool(
+            address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS
+        );
         vm.startPrank(admin);
         controller.executeAction(Actions.ActivatePolicy, address(fresh));
         fresh.setReserve(address(assetA), RESERVE_A, START_PREMIUM_A);
@@ -1113,8 +1356,9 @@ contract VirtualReservePoolTest is Test {
     }
 
     function _freshPoolConfiguredBoth() internal returns (Controller, VirtualReservePool) {
-        VirtualReservePool fresh =
-            new VirtualReservePool(address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS);
+        VirtualReservePool fresh = new VirtualReservePool(
+            address(controller), admin, HALF_LIFE, RESET_THRESHOLD_BPS, RESET_TARGET_BPS, MIN_PREMIUM_BPS
+        );
         vm.startPrank(admin);
         controller.executeAction(Actions.ActivatePolicy, address(fresh));
         fresh.setReserve(address(assetA), RESERVE_A, START_PREMIUM_A);
@@ -1127,6 +1371,15 @@ contract VirtualReservePoolTest is Test {
         ERC20Mock(asset_).mint(who, amount);
         vm.prank(who);
         ERC20Mock(asset_).approve(address(vault), amount);
+    }
+
+    /// @notice Quote, fund both assets, and execute a buy of `amount` tokens as `buyer`.
+    function _executeBuy(uint256 amount) internal {
+        (IController.Receipt[] memory q,,) = pool.quote(amount);
+        _fundAndApprove(buyer, address(assetA), q[0].amount);
+        _fundAndApprove(buyer, address(assetB), q[1].amount);
+        vm.prank(buyer);
+        pool.buy(amount, q, block.timestamp);
     }
 
     function _seedBacking(ERC20Mock token_, uint256 amount) internal {
